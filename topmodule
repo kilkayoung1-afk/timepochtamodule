@@ -1,6 +1,4 @@
 # meta developer: @your_username
-# scope: hikka_only
-# scope: hikka_min 1.3.0
 
 import asyncio
 from datetime import datetime, timedelta
@@ -16,10 +14,7 @@ class Top600Mod(loader.Module):
     strings = {
         "name": "Top600",
         "no_chat": "❌ Этот модуль работает только в группах!",
-        "loading": (
-            "⏳ <b>Собираю статистику...</b>\n"
-            "📊 Обработано сообщений: <code>{}</code>"
-        ),
+        "loading": "⏳ <b>Собираю статистику...</b>\n📊 Обработано сообщений: <code>{}</code>",
         "no_messages": "❌ Сообщений за выбранный период не найдено!",
         "top_header": (
             "🏆 <b>Топ активных участников</b>\n"
@@ -28,126 +23,102 @@ class Top600Mod(loader.Module):
             "👥 Уникальных участников: <b>{users}</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
         ),
-        "choosing_period": "📅 Выберите период для статистики:",
+        "choose_period": "📅 <b>Выберите период для статистики:</b>",
         "canceled": "❌ Отменено",
     }
 
-    strings_ru = {
-        "no_chat": "❌ Этот модуль работает только в группах!",
-        "loading": (
-            "⏳ <b>Собираю статистику...</b>\n"
-            "📊 Обработано сообщений: <code>{}</code>"
-        ),
-        "no_messages": "❌ Сообщений за выбранный период не найдено!",
-        "top_header": (
-            "🏆 <b>Топ активных участников</b>\n"
-            "📅 Период: <b>{period}</b>\n"
-            "💬 Всего сообщений: <b>{total}</b>\n"
-            "👥 Уникальных участников: <b>{users}</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-        ),
-        "choosing_period": "📅 Выберите период для статистики:",
-        "canceled": "❌ Отменено",
-    }
+    MEDALS = ["🥇", "🥈", "🥉"]
 
     PERIODS = {
-        "1️⃣ 1 день": 1,
-        "7️⃣ 7 дней": 7,
-        "📅 30 дней": 30,
-        "🌐 Всё время": 0,
-    }
-
-    MEDALS = {
-        1: "🥇",
-        2: "🥈",
-        3: "🥉",
+        "1d": ("1 день", 1),
+        "7d": ("7 дней", 7),
+        "30d": ("30 дней", 30),
+        "all": ("Всё время", 0),
     }
 
     async def top600cmd(self, message):
         """Показать топ активных участников чата"""
-        
         chat = message.chat
         if not isinstance(chat, (types.Chat, types.Channel)):
             await utils.answer(message, self.strings["no_chat"])
             return
 
-        period_buttons = []
-        for period_name in self.PERIODS:
-            period_buttons.append(
-                [{"text": period_name, "data": f"top600_{period_name}"}]
-            )
-
-        period_buttons.append(
-            [{"text": "❌ Отмена", "data": "top600_cancel"}]
-        )
-
         await self.inline.form(
-            text=self.strings["choosing_period"],
+            text=self.strings["choose_period"],
             message=message,
-            reply_markup=period_buttons,
+            reply_markup=[
+                [
+                    {"text": "1️⃣ 1 день", "data": "t6_1d"},
+                    {"text": "7️⃣ 7 дней", "data": "t6_7d"},
+                ],
+                [
+                    {"text": "📅 30 дней", "data": "t6_30d"},
+                    {"text": "🌐 Всё время", "data": "t6_all"},
+                ],
+                [{"text": "❌ Отмена", "data": "t6_cancel"}],
+            ],
             silent=True,
         )
 
-    async def _collect_stats(
-        self,
-        call,
-        chat_id: int,
-        days: int,
-        period_name: str,
-    ):
+    async def _collect_stats(self, call, chat_id, days, period_name):
         """Собирает статистику сообщений"""
-        
-        stats = defaultdict(lambda: {"count": 0, "name": "", "username": ""})
+        stats = defaultdict(lambda: {"count": 0, "name": "", "username": "", "uid": 0})
         total_messages = 0
-        
+
         date_from = None
         if days > 0:
             date_from = datetime.now() - timedelta(days=days)
 
-        status_msg_text = self.strings["loading"].format(0)
-        await call.edit(status_msg_text)
-        
-        update_interval = 200
-        
-        async for msg in self._client.iter_messages(
-            chat_id,
-            offset_date=None,
-            reverse=False,
-        ):
-            if date_from and msg.date.replace(tzinfo=None) < date_from:
-                break
+        await call.edit(self.strings["loading"].format(0))
 
-            if not msg.sender_id:
-                continue
+        try:
+            async for msg in self._client.iter_messages(chat_id, reverse=False):
+                if date_from and msg.date.replace(tzinfo=None) < date_from:
+                    break
 
-            if isinstance(msg, types.MessageService):
-                continue
+                if not msg.sender_id:
+                    continue
 
-            sender = await msg.get_sender()
-            if not sender or isinstance(sender, types.Channel):
-                continue
+                if isinstance(msg, types.MessageService):
+                    continue
 
-            if getattr(sender, "bot", False):
-                continue
+                try:
+                    sender = await msg.get_sender()
+                except Exception:
+                    continue
 
-            user_id = msg.sender_id
-            
-            if not stats[user_id]["name"]:
-                first = getattr(sender, "first_name", "") or ""
-                last = getattr(sender, "last_name", "") or ""
-                full_name = f"{first} {last}".strip() or "Deleted Account"
-                username = getattr(sender, "username", None)
-                
-                stats[user_id]["name"] = full_name
-                stats[user_id]["username"] = f"@{username}" if username else ""
+                if not sender:
+                    continue
 
-            stats[user_id]["count"] += 1
-            total_messages += 1
+                if isinstance(sender, types.Channel):
+                    continue
 
-            if total_messages % update_interval == 0:
-                await call.edit(
-                    self.strings["loading"].format(total_messages)
-                )
+                if getattr(sender, "bot", False):
+                    continue
+
+                uid = msg.sender_id
+
+                if not stats[uid]["name"]:
+                    first = getattr(sender, "first_name", "") or ""
+                    last = getattr(sender, "last_name", "") or ""
+                    full_name = f"{first} {last}".strip() or "Deleted Account"
+                    uname = getattr(sender, "username", None)
+                    stats[uid]["name"] = full_name
+                    stats[uid]["username"] = f"@{uname}" if uname else ""
+                    stats[uid]["uid"] = uid
+
+                stats[uid]["count"] += 1
+                total_messages += 1
+
+                if total_messages % 300 == 0:
+                    try:
+                        await call.edit(self.strings["loading"].format(total_messages))
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            await call.edit(f"❌ Ошибка при сборе статистики: {e}")
+            return
 
         if not stats:
             await call.edit(self.strings["no_messages"])
@@ -165,72 +136,56 @@ class Top600Mod(loader.Module):
             users=len(stats),
         )
 
-        for rank, (user_id, data) in enumerate(sorted_users, start=1):
-            medal = self.MEDALS.get(rank, f"<b>{rank}.</b>")
-            
+        for rank, (uid, data) in enumerate(sorted_users, start=1):
+            if rank <= 3:
+                place = self.MEDALS[rank - 1]
+            else:
+                place = f"<b>{rank}.</b>"
+
             name = data["name"]
             username = data["username"]
             count = data["count"]
-            
             percent = round((count / total_messages) * 100, 1)
-            
-            bar_filled = int(percent / 5)
-            bar = "█" * bar_filled + "░" * (10 - bar_filled)
-            
-            user_line = (
-                f"{medal} <a href='tg://user?id={user_id}'>{name}</a>"
-            )
+
+            filled = int(percent / 5)
+            bar = "█" * filled + "░" * (10 - filled)
+
+            line = f"{place} <a href='tg://user?id={uid}'>{name}</a>"
             if username:
-                user_line += f" ({username})"
-            
-            result += (
-                f"{user_line}\n"
-                f"   💬 {count} сообщ. [{bar}] {percent}%\n"
-            )
+                line += f" ({username})"
+
+            result += f"{line}\n   💬 {count} [{bar}] {percent}%\n"
+
+        period_key = None
+        for k, v in self.PERIODS.items():
+            if v[0] == period_name:
+                period_key = k
+                break
 
         await call.edit(
             result,
             reply_markup=[
-                [{"text": "🔄 Обновить", "data": f"top600_refresh_{days}_{period_name}"}],
-                [{"text": "❌ Закрыть", "data": "top600_close"}],
+                [{"text": "🔄 Обновить", "data": f"t6_{period_key}"}],
+                [{"text": "❌ Закрыть", "data": "t6_close"}],
             ],
-            parse_mode="html",
         )
 
     async def callback_handler(self, call):
-        """Обработчик кнопок"""
-        
-        if not call.data.startswith("top600_"):
+        """Обработчик inline кнопок"""
+        if not call.data.startswith("t6_"):
             return
 
-        data = call.data[len("top600_"):]
+        action = call.data[3:]
 
-        if data == "cancel":
+        if action == "cancel":
             await call.edit(self.strings["canceled"])
             return
 
-        if data == "close":
+        if action == "close":
             await call.delete()
             return
 
-        if data.startswith("refresh_"):
-            parts = data[len("refresh_"):].split("_", 1)
-            days = int(parts[0])
-            period_name = parts[1] if len(parts) > 1 else "Неизвестно"
-            await self._collect_stats(
-                call,
-                call.chat_id,
-                days,
-                period_name,
-            )
+        if action in self.PERIODS:
+            period_name, days = self.PERIODS[action]
+            await self._collect_stats(call, call.chat_id, days, period_name)
             return
-
-        for period_name, days in self.PERIODS.items():
-            if data == period_name:
-                await self._collect_stats(
-                    call,
-                    call.chat_id,
-                    days,
-                    period_name.split(" ", 1)[-1],
-                )
-                return
