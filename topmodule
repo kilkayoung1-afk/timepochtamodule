@@ -1,0 +1,42 @@
+from telethon import events
+from datetime import datetime, timedelta
+from heroku import cmd  # Предполагаемый декоратор команд в вашем форке
+from heroku.utils import admin_only
+import asyncio
+
+# Здесь должна быть логика подключения к вашей БД
+# Например, использование встроенных методов heroku-userbot для хранения данных
+
+@bot.on(events.NewMessage(incoming=True))
+async def count_messages(event):
+    if event.is_private:
+        return
+    # Логика инкремента сообщений пользователя в БД
+    # update_stats(event.chat_id, event.sender_id, datetime.now())
+
+@cmd(pattern="top (день|неделя|все)")
+@admin_only
+async def get_top(event):
+    period = event.pattern_match.group(1)
+    chat_id = event.chat_id
+    
+    await event.edit(f"📊 Считаю топ за **{period}**...")
+
+    # Определение временных рамок
+    now = datetime.now()
+    if period == "день":
+        start_date = now - timedelta(days=1)
+    elif period == "неделя":
+        start_date = now - timedelta(weeks=1)
+    else:
+        start_date = None
+
+    # Запрос к БД (псевдокод)
+    # top_list = await db.get_top_users(chat_id, start_date)
+    
+    # Пример вывода
+    res = f"🏆 **Топ активных за {period}:**\n\n"
+    # for i, user in enumerate(top_list, 1):
+    #    res += f"{i}. {user.name} — {user.count} сообщ.\n"
+    
+    await event.edit(res)
