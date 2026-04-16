@@ -1,93 +1,64 @@
-# -*- coding: utf-8 -*-
-
-"""
-    OnlySQ AI Module
-    Владелец: @Kilka_Young
-    API: https://my.onlysq.ru/api-keys
-    Модель: Claude Opus 4.6
-"""
-
-__version__ = (1, 0, 0)
+# meta developer: @Kilka_Young
+# scope: hikka_only
+# scope: hikka_min 1.6.2
 
 import aiohttp
-import logging
 from .. import loader, utils
 
-logger = logging.getLogger(__name__)
-
-
+@loader.tds
 class OnlySQMod(loader.Module):
-    """Модуль для работы с OnlySQ AI (Claude Opus 4.6)"""
-
+    """Модуль для работы с Claude Opus 4.6 через OnlySQ API"""
+    
     strings = {
         "name": "OnlySQ",
-        "no_token": "❌ <b>Токен не установлен!</b>\n\n"
-                   "Получите токен: https://my.onlysq.ru/api-keys\n"
-                   "Установите: <code>.sqtoken ВАШ_ТОКЕН</code>",
-        "token_saved": "✅ <b>Токен успешно сохранен!</b>",
-        "no_question": "❌ <b>Укажите запрос!</b>\n"
-                      "Пример: <code>.sq Привет, как дела?</code>",
-        "thinking": "🤔 <b>Думаю...</b>",
+        "no_token": "🔑 <b>Укажите API токен!</b>\n\nПолучите его на: https://my.onlysq.ru/api-keys\n\nИспользуйте: <code>.sqtoken ВАШ_ТОКЕН</code>",
+        "token_saved": "✅ <b>Токен успешно сохранён!</b>",
+        "no_question": "❓ <b>Укажите вопрос для Claude!</b>\n\nПример: <code>.claude Привет, как дела?</code>",
+        "thinking": "🤔 <b>Claude думает...</b>",
         "error": "❌ <b>Ошибка:</b> <code>{}</code>",
-        "response": "💬 <b>Claude Opus 4.6:</b>\n\n{}",
-        "api_error": "❌ <b>Ошибка API:</b> {}\n\n"
-                    "Проверьте токен: https://my.onlysq.ru/api-keys",
+        "owner": "👤 <b>Владелец модуля:</b> @Kilka_Young"
     }
-
-    strings_ru = {
-        "no_token": "❌ <b>Токен не установлен!</b>\n\n"
-                   "Получите токен: https://my.onlysq.ru/api-keys\n"
-                   "Установите: <code>.sqtoken ВАШ_ТОКЕН</code>",
-        "token_saved": "✅ <b>Токен успешно сохранен!</b>",
-        "no_question": "❌ <b>Укажите запрос!</b>\n"
-                      "Пример: <code>.sq Привет, как дела?</code>",
-        "thinking": "🤔 <b>Думаю...</b>",
-        "error": "❌ <b>Ошибка:</b> <code>{}</code>",
-        "response": "💬 <b>Claude Opus 4.6:</b>\n\n{}",
-        "api_error": "❌ <b>Ошибка API:</b> {}\n\n"
-                    "Проверьте токен: https://my.onlysq.ru/api-keys",
-    }
-
+    
     def __init__(self):
         self.config = loader.ModuleConfig(
             loader.ConfigValue(
                 "api_token",
-                None,
-                lambda: "API токен от https://my.onlysq.ru/api-keys",
-                validator=loader.validators.Hidden(),
+                "",
+                "API токен от https://my.onlysq.ru/api-keys",
+                validator=loader.validators.String()
             ),
             loader.ConfigValue(
                 "model",
                 "claude-opus-4.6",
-                lambda: "Модель AI (по умолчанию: claude-opus-4.6)",
+                "Модель Claude для использования",
+                validator=loader.validators.String()
             ),
             loader.ConfigValue(
                 "max_tokens",
                 4096,
-                lambda: "Максимальное количество токенов в ответе",
-                validator=loader.validators.Integer(minimum=100),
-            ),
+                "Максимальное количество токенов в ответе",
+                validator=loader.validators.Integer(minimum=1)
+            )
         )
-
+    
     async def client_ready(self, client, db):
-        self._db = db
-        self._client = client
-
-    @loader.command(ru_doc="Установить API токен")
+        self.client = client
+        self.db = db
+    
+    @loader.command()
     async def sqtoken(self, message):
-        """Установить API токен от OnlySQ"""
+        """<токен> - Установить API токен OnlySQ"""
         args = utils.get_args_raw(message)
-        
         if not args:
             await utils.answer(message, self.strings["no_token"])
             return
         
         self.config["api_token"] = args.strip()
         await utils.answer(message, self.strings["token_saved"])
-
-    @loader.command(ru_doc="Отправить запрос к Claude Opus 4.6")
-    async def sq(self, message):
-        """<запрос> - Отправить запрос к Claude Opus 4.6"""
+    
+    @loader.command()
+    async def claude(self, message):
+        """<вопрос> - Задать вопрос Claude Opus 4.6"""
         args = utils.get_args_raw(message)
         
         if not args:
@@ -101,25 +72,18 @@ class OnlySQMod(loader.Module):
         await utils.answer(message, self.strings["thinking"])
         
         try:
-            response = await self._make_request(args)
-            await utils.answer(
-                message,
-                self.strings["response"].format(response)
-            )
+            response = await self._ask_claude(args)
+            await utils.answer(message, f"🤖 <b>Claude Opus 4.6:</b>\n\n{response}")
         except Exception as e:
-            logger.exception("OnlySQ API error")
-            await utils.answer(
-                message,
-                self.strings["api_error"].format(str(e))
-            )
-
-    async def _make_request(self, prompt: str) -> str:
-        """Отправка запроса к OnlySQ API"""
+            await utils.answer(message, self.strings["error"].format(str(e)))
+    
+    async def _ask_claude(self, question: str) -> str:
+        """Отправка запроса к Claude через OnlySQ API"""
         url = "https://my.onlysq.ru/v1/chat/completions"
         
         headers = {
             "Authorization": f"Bearer {self.config['api_token']}",
-            "Content-Type": "application/json",
+            "Content-Type": "application/json"
         }
         
         payload = {
@@ -127,38 +91,33 @@ class OnlySQMod(loader.Module):
             "messages": [
                 {
                     "role": "user",
-                    "content": prompt
+                    "content": question
                 }
             ],
-            "max_tokens": self.config["max_tokens"],
+            "max_tokens": self.config["max_tokens"]
         }
         
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    raise Exception(f"HTTP {resp.status}: {error_text}")
+                    raise Exception(f"API Error {resp.status}: {error_text}")
                 
                 data = await resp.json()
-                
-                if "choices" not in data or not data["choices"]:
-                    raise Exception("Пустой ответ от API")
-                
                 return data["choices"][0]["message"]["content"]
-
-    @loader.command(ru_doc="Информация о модуле")
+    
+    @loader.command()
     async def sqinfo(self, message):
-        """Показать информацию о модуле"""
+        """Информация о модуле OnlySQ"""
         info = (
-            f"📱 <b>OnlySQ AI Module</b>\n\n"
-            f"👤 <b>Владелец:</b> @Kilka_Young\n"
-            f"🤖 <b>Модель:</b> {self.config['model']}\n"
+            f"📋 <b>OnlySQ Claude Module</b>\n\n"
+            f"{self.strings['owner']}\n"
+            f"🤖 <b>Модель:</b> <code>{self.config['model']}</code>\n"
             f"🔑 <b>Токен:</b> {'✅ Установлен' if self.config['api_token'] else '❌ Не установлен'}\n"
-            f"📊 <b>Max tokens:</b> {self.config['max_tokens']}\n\n"
-            f"🔗 <b>Получить токен:</b> https://my.onlysq.ru/api-keys\n\n"
+            f"🌐 <b>API:</b> https://my.onlysq.ru/api-keys\n\n"
             f"<b>Команды:</b>\n"
-            f"• <code>.sqtoken [токен]</code> - установить токен\n"
-            f"• <code>.sq [запрос]</code> - отправить запрос\n"
+            f"• <code>.sqtoken</code> - установить токен\n"
+            f"• <code>.claude</code> - спросить Claude\n"
             f"• <code>.sqinfo</code> - информация о модуле"
         )
         await utils.answer(message, info)
