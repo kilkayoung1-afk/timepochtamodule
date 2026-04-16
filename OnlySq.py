@@ -3,6 +3,7 @@
 # scope: hikka_min 1.6.2
 
 import aiohttp
+import json
 from .. import loader, utils
 
 @loader.tds
@@ -36,7 +37,7 @@ class OnlySQMod(loader.Module):
             loader.ConfigValue(
                 "model",
                 "claude-opus-4",
-                "Модель Claude для использования",
+                "Модель для использования (claude-opus-4, gemini-2.0-flash и т.д.)",
                 validator=loader.validators.String()
             ),
             loader.ConfigValue(
@@ -46,6 +47,7 @@ class OnlySQMod(loader.Module):
                 validator=loader.validators.Integer(minimum=1)
             )
         )
+        self.conversation_history = {}
     
     async def client_ready(self, client, db):
         self.client = client
@@ -64,7 +66,7 @@ class OnlySQMod(loader.Module):
     
     @loader.command()
     async def claude(self, message):
-        """<вопрос> - Задать вопрос Claude Opus"""
+        """<вопрос> - Задать вопрос Claude/AI"""
         args = utils.get_args_raw(message)
         
         if not args:
@@ -78,74 +80,124 @@ class OnlySQMod(loader.Module):
         await utils.answer(message, self.strings["thinking"])
         
         try:
-            response = await self._ask_claude(args)
-            await utils.answer(message, f"🤖 <b>Claude:</b>\n\n{response}")
+            response = await self._ask_ai(args)
+            await utils.answer(message, f"🤖 <b>{self.config['model']}:</b>\n\n{response}")
         except Exception as e:
             await utils.answer(message, self.strings["error"].format(str(e)))
     
-    async def _ask_claude(self, question: str) -> str:
-        """Отправка запроса к Claude через OnlySQ API"""
+    @loader.command()
+    async def sqclear(self, message):
+        """Очистить историю диалога"""
+        chat_id = message.chat_id
+        if chat_id in self.conversation_history:
+            del self.conversation_history[chat_id]
+        await utils.answer(message, "✅ <b>История диалога очищена</b>")
+    
+    async def _ask_ai(self, question: str, chat_id: int = None) -> str:
+        """Отправка запроса к AI через OnlySQ API"""
         
         headers = {
             "Authorization": f"Bearer {self.config['api_token']}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Accept": "application/json"
         }
+        
+        # Формируем сообщения
+        messages = [
+            {
+                "role": "user",
+                "content": question
+            }
+        ]
         
         payload = {
             "model": self.config["model"],
-            "messages": [
-                {
-                    "role": "user",
-                    "content": question
-                }
-            ],
+            "messages": messages,
             "max_tokens": self.config["max_tokens"],
-            "stream": False
+            "temperature": 0.7
         }
         
-        # Пробуем разные URL
-        urls = [
-            self.config["api_url"],
-            "https://api.onlysq.ru/v1/chat/completions",
-            "https://my.onlysq.ru/api/v1/chat/completions",
-            "https://onlysq.ru/v1/chat/completions",
-        ]
-        
         async with aiohttp.ClientSession() as session:
-            for url in urls:
-                try:
-                    async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            # Сохраняем рабочий URL
-                            self.config["api_url"] = url
-                            return data["choices"][0]["message"]["content"]
-                        elif resp.status != 405:  # Если не 405, пробуем обработать другие ошибки
-                            error_text = await resp.text()
-                            raise Exception(f"API Error {resp.status}: {error_text}")
-                except aiohttp.ClientError:
-                    continue
-            
-            raise Exception("Не удалось найти рабочий API endpoint. Проверьте токен и доступность сервиса.")
+            async with session.post(
+                self.config["api_url"], 
+                json=payload, 
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=120)
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise Exception(f"API Error {resp.status}: {error_text}")
+                
+                data = await resp.json()
+                
+                # Извлекаем ответ
+                if "choices" in data and len(data["choices"]) > 0:
+                    return data["choices"][0]["message"]["content"]
+                else:
+                    raise Exception(f"Неожиданный формат ответа: {data}")
     
     @loader.command()
     async def sqinfo(self, message):
         """Информация о модуле OnlySQ"""
         info = (
-            f"📋 <b>OnlySQ Claude Module</b>\n\n"
+            f"📋 <b>OnlySQ AI Module</b>\n\n"
             f"{self.strings['owner']}\n"
             f"🤖 <b>Модель:</b> <code>{self.config['model']}</code>\n"
             f"🔑 <b>Токен:</b> {'✅ Установлен' if self.config['api_token'] else '❌ Не установлен'}\n"
             f"🌐 <b>API URL:</b> <code>{self.config['api_url']}</code>\n"
             f"🌐 <b>Сайт:</b> https://my.onlysq.ru/api-keys\n\n"
             f"<b>Команды:</b>\n"
-            f"• <code>.sqtoken</code> - установить токен\n"
-            f"• <code>.claude</code> - спросить Claude\n"
+            f"• <code>.sqtoken [токен]</code> - установить токен\n"
+            f"• <code>.claude [вопрос]</code> - спросить AI\n"
+            f"• <code>.sqclear</code> - очистить историю\n"
             f"• <code>.sqinfo</code> - информация о модуле\n\n"
-            f"<b>Доступные модели:</b>\n"
+            f"<b>Примеры моделей:</b>\n"
             f"• claude-opus-4\n"
             f"• claude-sonnet-3.5\n"
-            f"• claude-3-opus\n\n"
+            f"• gemini-2.0-flash\n"
+            f"• gpt-4\n\n"
             f"Измените модель: <code>.config OnlySQ</code>"
         )
         await utils.answer(message, info)
+    
+    @loader.command()
+    async def sqtest(self, message):
+        """Тестовый запрос к API для проверки"""
+        if not self.config["api_token"]:
+            await utils.answer(message, self.strings["no_token"])
+            return
+        
+        await utils.answer(message, "🔍 <b>Тестирую подключение к API...</b>")
+        
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.config['api_token']}",
+                "Content-Type": "application/json",
+            }
+            
+            payload = {
+                "model": self.config["model"],
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 50
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.config["api_url"],
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    status = resp.status
+                    text = await resp.text()
+                    
+                    result = (
+                        f"📊 <b>Результат теста:</b>\n\n"
+                        f"<b>Status:</b> <code>{status}</code>\n"
+                        f"<b>URL:</b> <code>{self.config['api_url']}</code>\n"
+                        f"<b>Model:</b> <code>{self.config['model']}</code>\n\n"
+                        f"<b>Response:</b>\n<code>{text[:500]}</code>"
+                    )
+                    await utils.answer(message, result)
+        except Exception as e:
+            await utils.answer(message, self.strings["error"].format(str(e)))
