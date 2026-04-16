@@ -19,7 +19,6 @@ class HerokuModeratorMod(loader.Module):
     }
 
     def __init__(self):
-        # Конфигурация уровней админки. Настраивается через .config HerokuModerator
         self.config = loader.ModuleConfig(
             "lvl1", "delete_messages", "Права для 1 уровня (через запятую)",
             "lvl2", "delete_messages, ban_users", "Права для 2 уровня",
@@ -29,7 +28,6 @@ class HerokuModeratorMod(loader.Module):
         )
 
     async def _get_user(self, message, args):
-        """Хелпер для получения ID пользователя из реплая или аргумента"""
         reply = await message.get_reply_message()
         if reply:
             return reply.sender_id
@@ -41,66 +39,72 @@ class HerokuModeratorMod(loader.Module):
                 pass
         return None
 
-    @loader.command(ru_doc="<reply/id> - Забанить пользователя")
+    @loader.command()
     async def bancmd(self, message):
+        """<reply/id> - Забанить пользователя"""
         user = await self._get_user(message, utils.get_args_raw(message))
         if not user:
-            return await utils.answer(message, self.strings("need_reply"))
+            return await utils.answer(message, self.strings("need_reply", message))
         try:
             await message.client.edit_permissions(message.chat_id, user, view_messages=False)
             await utils.answer(message, "<b>✅ Пользователь забанен!</b>")
         except ChatAdminRequiredError:
-            await utils.answer(message, self.strings("not_admin"))
+            await utils.answer(message, self.strings("not_admin", message))
 
-    @loader.command(ru_doc="<reply/id> - Выдать мут пользователю")
+    @loader.command()
     async def mutecmd(self, message):
+        """<reply/id> - Выдать мут пользователю"""
         user = await self._get_user(message, utils.get_args_raw(message))
         if not user:
-            return await utils.answer(message, self.strings("need_reply"))
+            return await utils.answer(message, self.strings("need_reply", message))
         try:
             await message.client.edit_permissions(message.chat_id, user, send_messages=False)
             await utils.answer(message, "<b>✅ Пользователь отправлен в мут!</b>")
         except ChatAdminRequiredError:
-            await utils.answer(message, self.strings("not_admin"))
+            await utils.answer(message, self.strings("not_admin", message))
 
-    @loader.command(ru_doc="<reply/id> - Кикнуть пользователя из чата")
+    @loader.command()
     async def kickcmd(self, message):
+        """<reply/id> - Кикнуть пользователя из чата"""
         user = await self._get_user(message, utils.get_args_raw(message))
         if not user:
-            return await utils.answer(message, self.strings("need_reply"))
+            return await utils.answer(message, self.strings("need_reply", message))
         try:
             await message.client.kick_participant(message.chat_id, user)
             await utils.answer(message, "<b>✅ Пользователь кикнут!</b>")
         except ChatAdminRequiredError:
-            await utils.answer(message, self.strings("not_admin"))
+            await utils.answer(message, self.strings("not_admin", message))
 
-    @loader.command(ru_doc="Закрыть чат (запретить отправку сообщений всем)")
+    @loader.command()
     async def lockcmd(self, message):
+        """Закрыть чат (запретить отправку сообщений всем)"""
         try:
             await message.client.edit_permissions(message.chat_id, send_messages=False)
             await utils.answer(message, "<b>🔒 Чат закрыт!</b>")
         except ChatAdminRequiredError:
-            await utils.answer(message, self.strings("not_admin"))
+            await utils.answer(message, self.strings("not_admin", message))
 
-    @loader.command(ru_doc="Открыть чат")
+    @loader.command()
     async def unlockcmd(self, message):
+        """Открыть чат"""
         try:
             await message.client.edit_permissions(message.chat_id, send_messages=True)
             await utils.answer(message, "<b>🔓 Чат открыт!</b>")
         except ChatAdminRequiredError:
-            await utils.answer(message, self.strings("not_admin"))
+            await utils.answer(message, self.strings("not_admin", message))
 
-    @loader.command(ru_doc="<reply/id> <1-5> - Выдать админку указанного уровня")
+    @loader.command()
     async def setadmcmd(self, message):
+        """<reply/id> <1-5> - Выдать админку указанного уровня"""
         args = utils.get_args_raw(message).split()
         user = await self._get_user(message, args[0] if len(args) > 0 else "")
         
         if not user:
-            return await utils.answer(message, self.strings("need_reply"))
+            return await utils.answer(message, self.strings("need_reply", message))
         
         level = args[-1] if args else None
         if not level or not level.isdigit() or not (1 <= int(level) <= 5):
-            return await utils.answer(message, self.strings("lvl_invalid"))
+            return await utils.answer(message, self.strings("lvl_invalid", message))
             
         rights_str = self.config[f"lvl{level}"]
         rights_list = [r.strip() for r in rights_str.split(",")]
@@ -123,15 +127,16 @@ class HerokuModeratorMod(loader.Module):
             await message.client.edit_admin(message.chat_id, user, **admin_kwargs)
             await utils.answer(message, f"<b>✅ Выдана админка {level} уровня!</b>\n⚙️ <i>Права: {rights_str}</i>")
         except ChatAdminRequiredError:
-            await utils.answer(message, self.strings("not_admin"))
+            await utils.answer(message, self.strings("not_admin", message))
 
-    @loader.command(ru_doc="<1d/7d/1m/all> - Топ 600 активных пользователей")
+    @loader.command()
     async def topcmd(self, message):
+        """<1d/7d/1m/all> - Топ 600 активных пользователей"""
         args = utils.get_args_raw(message).lower()
         if args not in ["1d", "7d", "1m", "all"]:
-            return await utils.answer(message, self.strings("invalid_period"))
+            return await utils.answer(message, self.strings("invalid_period", message))
             
-        await utils.answer(message, self.strings("top_processing"))
+        await utils.answer(message, self.strings("top_processing", message))
         
         now = datetime.datetime.now(datetime.timezone.utc)
         limit_date = None
@@ -142,7 +147,7 @@ class HerokuModeratorMod(loader.Module):
         counts = {}
         async for msg in message.client.iter_messages(message.chat_id):
             if limit_date and msg.date < limit_date:
-                break # Прерываем цикл, когда доходим до старых сообщений
+                break
             if msg.sender_id:
                 counts[msg.sender_id] = counts.get(msg.sender_id, 0) + 1
                 
@@ -160,9 +165,10 @@ class HerokuModeratorMod(loader.Module):
         else:
             await utils.answer(message, text)
 
-    @loader.command(ru_doc="Статистика сообщений чата (1d, 1m, все время)")
+    @loader.command()
     async def statscmd(self, message):
-        await utils.answer(message, self.strings("top_processing"))
+        """Статистика сообщений чата (1d, 1m, все время)"""
+        await utils.answer(message, self.strings("top_processing", message))
         now = datetime.datetime.now(datetime.timezone.utc)
         date_1d = now - datetime.timedelta(days=1)
         date_1m = now - datetime.timedelta(days=30)
@@ -170,7 +176,6 @@ class HerokuModeratorMod(loader.Module):
         count_1d = 0
         count_1m = 0
         
-        # Считаем только за последний месяц, чтобы не парсить весь чат
         async for msg in message.client.iter_messages(message.chat_id):
             if msg.date < date_1m:
                 break
@@ -178,7 +183,6 @@ class HerokuModeratorMod(loader.Module):
             if msg.date >= date_1d:
                 count_1d += 1
                 
-        # Получаем общее количество моментально (хитрость Telethon)
         count_all = (await message.client.get_messages(message.chat_id, limit=1)).total
                 
         text = (
