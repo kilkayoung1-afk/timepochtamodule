@@ -28,8 +28,14 @@ class OnlySQMod(loader.Module):
                 validator=loader.validators.String()
             ),
             loader.ConfigValue(
+                "api_url",
+                "https://api.onlysq.ru/v1/chat/completions",
+                "URL API endpoint",
+                validator=loader.validators.String()
+            ),
+            loader.ConfigValue(
                 "model",
-                "claude-opus-4.6",
+                "claude-opus-4",
                 "Модель Claude для использования",
                 validator=loader.validators.String()
             ),
@@ -58,7 +64,7 @@ class OnlySQMod(loader.Module):
     
     @loader.command()
     async def claude(self, message):
-        """<вопрос> - Задать вопрос Claude Opus 4.6"""
+        """<вопрос> - Задать вопрос Claude Opus"""
         args = utils.get_args_raw(message)
         
         if not args:
@@ -73,13 +79,12 @@ class OnlySQMod(loader.Module):
         
         try:
             response = await self._ask_claude(args)
-            await utils.answer(message, f"🤖 <b>Claude Opus 4.6:</b>\n\n{response}")
+            await utils.answer(message, f"🤖 <b>Claude:</b>\n\n{response}")
         except Exception as e:
             await utils.answer(message, self.strings["error"].format(str(e)))
     
     async def _ask_claude(self, question: str) -> str:
         """Отправка запроса к Claude через OnlySQ API"""
-        url = "https://my.onlysq.ru/v1/chat/completions"
         
         headers = {
             "Authorization": f"Bearer {self.config['api_token']}",
@@ -94,17 +99,34 @@ class OnlySQMod(loader.Module):
                     "content": question
                 }
             ],
-            "max_tokens": self.config["max_tokens"]
+            "max_tokens": self.config["max_tokens"],
+            "stream": False
         }
         
+        # Пробуем разные URL
+        urls = [
+            self.config["api_url"],
+            "https://api.onlysq.ru/v1/chat/completions",
+            "https://my.onlysq.ru/api/v1/chat/completions",
+            "https://onlysq.ru/v1/chat/completions",
+        ]
+        
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise Exception(f"API Error {resp.status}: {error_text}")
-                
-                data = await resp.json()
-                return data["choices"][0]["message"]["content"]
+            for url in urls:
+                try:
+                    async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            # Сохраняем рабочий URL
+                            self.config["api_url"] = url
+                            return data["choices"][0]["message"]["content"]
+                        elif resp.status != 405:  # Если не 405, пробуем обработать другие ошибки
+                            error_text = await resp.text()
+                            raise Exception(f"API Error {resp.status}: {error_text}")
+                except aiohttp.ClientError:
+                    continue
+            
+            raise Exception("Не удалось найти рабочий API endpoint. Проверьте токен и доступность сервиса.")
     
     @loader.command()
     async def sqinfo(self, message):
@@ -114,10 +136,16 @@ class OnlySQMod(loader.Module):
             f"{self.strings['owner']}\n"
             f"🤖 <b>Модель:</b> <code>{self.config['model']}</code>\n"
             f"🔑 <b>Токен:</b> {'✅ Установлен' if self.config['api_token'] else '❌ Не установлен'}\n"
-            f"🌐 <b>API:</b> https://my.onlysq.ru/api-keys\n\n"
+            f"🌐 <b>API URL:</b> <code>{self.config['api_url']}</code>\n"
+            f"🌐 <b>Сайт:</b> https://my.onlysq.ru/api-keys\n\n"
             f"<b>Команды:</b>\n"
             f"• <code>.sqtoken</code> - установить токен\n"
             f"• <code>.claude</code> - спросить Claude\n"
-            f"• <code>.sqinfo</code> - информация о модуле"
+            f"• <code>.sqinfo</code> - информация о модуле\n\n"
+            f"<b>Доступные модели:</b>\n"
+            f"• claude-opus-4\n"
+            f"• claude-sonnet-3.5\n"
+            f"• claude-3-opus\n\n"
+            f"Измените модель: <code>.config OnlySQ</code>"
         )
         await utils.answer(message, info)
