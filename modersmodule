@@ -1,754 +1,190 @@
-# meta developer: @your_channel
-# scope: hikka_only
-# scope: heroku_only
-
-# ──────────────────────────────────────────────
-#   ChatModerator — модуль модерации для Heroku
-#   Команды: бан, разбан, мут, размут, кик,
-#            замок, открыть, топ, статс,
-#            повыс, понис, настроить
-# ──────────────────────────────────────────────
+# meta developer: @Kilka_Young
+# meta description: Продвинутый модуль модерации чатов с системой уровней и статистикой
 
 import datetime
-import time
-import asyncio
-import re
-
-from telethon.tl.functions.channels import (
-    EditBannedRequest,
-    EditAdminRequest,
-)
-from telethon.tl.functions.messages import EditChatDefaultBannedRightsRequest
-from telethon.tl.types import (
-    ChatBannedRights,
-    ChatAdminRights,
-    Channel,
-    Chat,
-)
-from telethon.errors import (
-    ChatAdminRequiredError,
-    UserAdminInvalidError,
-    UserNotParticipantError,
-)
-
+import io
+from telethon.errors import ChatAdminRequiredError
 from .. import loader, utils
 
-
-# ── Вспомогательные функции ──────────────────
-
-def parse_time(raw: str) -> int:
-    """Конвертирует строку вида '30м', '2ч', '1д' в секунды. 0 = навсегда."""
-    if not raw:
-        return 0
-    raw = raw.strip().lower()
-    match = re.fullmatch(r"(\d+)(м|ч|д|w|h|m|d|мин|час|ден)", raw)
-    if not match:
-        return 0
-    amount, unit = int(match.group(1)), match.group(2)
-    multipliers = {"м": 60, "m": 60, "мин": 60,
-                   "ч": 3600, "h": 3600, "час": 3600,
-                   "д": 86400, "d": 86400, "ден": 86400,
-                   "w": 604800}
-    return amount * multipliers.get(unit, 0)
-
-
-def time_until(seconds: int) -> datetime.datetime | None:
-    if seconds == 0:
-        return None
-    return datetime.datetime.utcnow() + datetime.timedelta(seconds=seconds)
-
-
-def fmt_time(seconds: int) -> str:
-    if seconds == 0:
-        return "навсегда"
-    if seconds < 60:
-        return f"{seconds}с"
-    if seconds < 3600:
-        return f"{seconds // 60}м"
-    if seconds < 86400:
-        return f"{seconds // 3600}ч"
-    return f"{seconds // 86400}д"
-
-
-def now_ts() -> int:
-    return int(time.time())
-
-
-# ── Права по уровням ────────────────────────
-
-LEVEL_RIGHTS: dict[int, dict] = {
-    1: dict(
-        change_info=False, post_messages=False, edit_messages=False,
-        delete_messages=False, ban_users=False, invite_users=True,
-        pin_messages=False, add_admins=False, manage_call=False,
-    ),
-    2: dict(
-        change_info=False, post_messages=False, edit_messages=False,
-        delete_messages=True, ban_users=True, invite_users=True,
-        pin_messages=False, add_admins=False, manage_call=False,
-    ),
-    3: dict(
-        change_info=False, post_messages=False, edit_messages=False,
-        delete_messages=True, ban_users=True, invite_users=True,
-        pin_messages=True, add_admins=False, manage_call=True,
-    ),
-    4: dict(
-        change_info=True, post_messages=True, edit_messages=True,
-        delete_messages=True, ban_users=True, invite_users=True,
-        pin_messages=True, add_admins=False, manage_call=True,
-    ),
-    5: dict(
-        change_info=True, post_messages=True, edit_messages=True,
-        delete_messages=True, ban_users=True, invite_users=True,
-        pin_messages=True, add_admins=False, manage_call=True,
-    ),
-}
-
-LEVEL_NAMES = {1: "⭐", 2: "⭐⭐", 3: "⭐⭐⭐", 4: "⭐⭐⭐⭐", 5: "⭐⭐⭐⭐⭐"}
-
-
 @loader.tds
-class ChatModeratorMod(loader.Module):
-    """Модерация чата: бан/мут/кик, топ активности, статистика, система админов"""
-
+class HerokuModeratorMod(loader.Module):
+    """Модуль для модерации чатов с рангами и статистикой"""
     strings = {
-        "name": "ChatModerator",
-        # ── общие ──
-        "no_reply": "❌ <b>Ответьте на сообщение или укажите @username / ID</b>",
-        "not_admin": "❌ <b>Вы не являетесь администратором этого чата</b>",
-        "not_supergroup": "❌ <b>Команда работает только в супергруппах/каналах</b>",
-        "no_rights": "❌ <b>Недостаточно прав для этого действия</b>",
-        "user_not_found": "❌ <b>Пользователь не найден</b>",
-        "error": "❌ <b>Ошибка:</b> {}",
-        # ── бан ──
-        "ban_ok": "🔨 <b>{} забанен</b>\n👤 ID: <code>{}</code>\n📝 Причина: {}",
-        "unban_ok": "✅ <b>{} разбанен</b>",
-        # ── мут ──
-        "mute_ok": "🔇 <b>{} замьючен на {}</b>\n📝 Причина: {}",
-        "unmute_ok": "🔊 <b>{} размьючен</b>",
-        # ── кик ──
-        "kick_ok": "👢 <b>{} кикнут</b>\n📝 Причина: {}",
-        # ── замок ──
-        "lock_ok": "🔒 <b>Чат закрыт</b> — только администраторы могут писать",
-        "unlock_ok": "🔓 <b>Чат открыт</b>",
-        # ── топ ──
-        "top_empty": "📊 <b>Нет данных за выбранный период</b>",
-        "top_header": "🏆 <b>Топ активности — {}</b>\n\n",
-        "top_row": "{pos}. {name} — <b>{count}</b> сообщ.\n",
-        # ── статс ──
-        "stats": (
-            "📈 <b>Статистика чата</b>\n\n"
-            "За 24 часа: <b>{day}</b>\n"
-            "За месяц:   <b>{month}</b>\n"
-            "За всё время: <b>{total}</b>"
-        ),
-        # ── повышение ──
-        "promote_ok": (
-            "⬆️ <b>{name}</b> получил права администратора\n"
-            "Уровень: {level}\n"
-            "Права: {rights}"
-        ),
-        "demote_ok": "⬇️ <b>{}</b> лишён прав администратора",
-        "level_too_high": "❌ <b>Нельзя выдать уровень выше вашего (макс: {})</b>",
-        "level_invalid": "❌ <b>Уровень должен быть от 1 до 5</b>",
-        # ── настройка уровня ──
-        "config_header": "⚙️ <b>Текущие права уровня {}</b>\n\n{}",
-        "config_saved": "✅ <b>Права уровня {} обновлены</b>",
-        "config_usage": (
-            "⚙️ <b>Использование:</b>\n"
-            "<code>.настроить [уровень 1-5] [право=вкл/выкл ...]</code>\n\n"
-            "<b>Доступные права:</b>\n"
-            "change_info, post_messages, edit_messages,\n"
-            "delete_messages, ban_users, invite_users,\n"
-            "pin_messages, manage_call"
-        ),
+        "name": "HerokuModerator",
+        "not_admin": "<b>❌ Я не администратор в этом чате или мне не хватает прав!</b>",
+        "need_reply": "<b>❌ Ответь на сообщение пользователя или укажи его ID/username!</b>",
+        "lvl_invalid": "<b>❌ Укажи корректный уровень админки (от 1 до 5)!</b>",
+        "top_processing": "<b>⏳ Собираю данные... Это может занять немного времени.</b>",
+        "invalid_period": "<b>❌ Укажи доступный период: 1d, 7d, 1m, all</b>"
     }
 
-    # ── Инициализация ────────────────────────
-
-    async def client_ready(self, client, db):
-        self._client = client
-        self._db = db
-        self._me = await client.get_me()
-
-    # ── Внутренние хелперы ───────────────────
-
-    def _msgs_key(self, chat_id: int) -> str:
-        return f"msgs_{chat_id}"
-
-    def _admins_key(self, chat_id: int) -> str:
-        return f"admins_{chat_id}"
-
-    def _level_cfg_key(self, level: int) -> str:
-        return f"level_rights_{level}"
-
-    def _get_msgs(self, chat_id: int) -> list:
-        """Возвращает список [user_id, timestamp] для чата."""
-        return self._db.get(self.strings["name"], self._msgs_key(chat_id), [])
-
-    def _save_msgs(self, chat_id: int, data: list):
-        self._db.set(self.strings["name"], self._msgs_key(chat_id), data)
-
-    def _get_level_rights(self, level: int) -> dict:
-        saved = self._db.get(
-            self.strings["name"], self._level_cfg_key(level), None
+    def __init__(self):
+        # Конфигурация уровней админки. Настраивается через .config HerokuModerator
+        self.config = loader.ModuleConfig(
+            "lvl1", "delete_messages", "Права для 1 уровня (через запятую)",
+            "lvl2", "delete_messages, ban_users", "Права для 2 уровня",
+            "lvl3", "delete_messages, ban_users, pin_messages, invite_users", "Права для 3 уровня",
+            "lvl4", "delete_messages, ban_users, pin_messages, invite_users, change_info, manage_call", "Права для 4 уровня",
+            "lvl5", "delete_messages, ban_users, pin_messages, invite_users, change_info, manage_call, add_admins", "Права для 5 уровня"
         )
-        return saved if saved else LEVEL_RIGHTS[level].copy()
 
-    def _get_admins(self, chat_id: int) -> dict:
-        """Возвращает {user_id: level} выданных через модуль админов."""
-        return self._db.get(self.strings["name"], self._admins_key(chat_id), {})
-
-    def _save_admins(self, chat_id: int, data: dict):
-        self._db.set(self.strings["name"], self._admins_key(chat_id), data)
-
-    async def _is_chat_admin(self, message) -> bool:
-        """Проверяет, является ли userbot-аккаунт администратором чата."""
-        try:
-            perms = await self._client.get_permissions(
-                message.peer_id, self._me.id
-            )
-            return getattr(perms, "is_admin", False) or getattr(
-                perms, "is_creator", False
-            )
-        except Exception:
-            return False
-
-    async def _resolve_target(self, message):
-        """Возвращает entity пользователя: reply или первый аргумент."""
+    async def _get_user(self, message, args):
+        """Хелпер для получения ID пользователя из реплая или аргумента"""
         reply = await message.get_reply_message()
         if reply:
-            return await self._client.get_entity(reply.sender_id)
-        args = utils.get_args_raw(message).strip().split()
+            return reply.sender_id
         if args:
             try:
-                return await self._client.get_entity(
-                    int(args[0]) if args[0].lstrip("-").isdigit() else args[0]
-                )
+                user = await message.client.get_entity(args.split()[0])
+                return user.id
             except Exception:
-                return None
+                pass
         return None
 
-    def _get_args_after_target(self, message, has_reply: bool) -> list[str]:
-        """Возвращает аргументы, идущие после цели."""
-        raw = utils.get_args_raw(message).strip().split()
-        if has_reply:
-            return raw  # всё — аргументы
-        return raw[1:] if raw else []
-
-    async def _is_supergroup(self, message) -> bool:
+    @loader.command(ru_doc="<reply/id> - Забанить пользователя")
+    async def bancmd(self, message):
+        user = await self._get_user(message, utils.get_args_raw(message))
+        if not user:
+            return await utils.answer(message, self.strings("need_reply"))
         try:
-            chat = await message.get_chat()
-            return isinstance(chat, Channel) and chat.megagroup
-        except Exception:
-            return False
+            await message.client.edit_permissions(message.chat_id, user, view_messages=False)
+            await utils.answer(message, "<b>✅ Пользователь забанен!</b>")
+        except ChatAdminRequiredError:
+            await utils.answer(message, self.strings("not_admin"))
 
-    # ── Watcher: подсчёт сообщений ──────────
-
-    @loader.watcher("only_groups")
-    async def watcher(self, message):
-        """Считает все сообщения в группах для статистики."""
+    @loader.command(ru_doc="<reply/id> - Выдать мут пользователю")
+    async def mutecmd(self, message):
+        user = await self._get_user(message, utils.get_args_raw(message))
+        if not user:
+            return await utils.answer(message, self.strings("need_reply"))
         try:
-            chat_id = utils.get_chat_id(message)
-            sender_id = getattr(message, "sender_id", None)
-            if not sender_id:
-                return
-            data = self._get_msgs(chat_id)
-            data.append([sender_id, now_ts()])
-            # Чтобы не разрастаться — храним не более 50 000 записей на чат
-            if len(data) > 50000:
-                data = data[-50000:]
-            self._save_msgs(chat_id, data)
-        except Exception:
-            pass
+            await message.client.edit_permissions(message.chat_id, user, send_messages=False)
+            await utils.answer(message, "<b>✅ Пользователь отправлен в мут!</b>")
+        except ChatAdminRequiredError:
+            await utils.answer(message, self.strings("not_admin"))
 
-    # ═══════════════════════════════════════
-    #   КОМАНДЫ МОДЕРАЦИИ
-    # ═══════════════════════════════════════
-
-    @loader.command(ru_doc="Забанить пользователя: .бан [reply/@user/id] [причина]")
-    async def банcmd(self, message):
-        if not await self._is_supergroup(message):
-            return await utils.answer(message, self.strings["not_supergroup"])
-        if not await self._is_chat_admin(message):
-            return await utils.answer(message, self.strings["not_admin"])
-
-        reply = await message.get_reply_message()
-        target = await self._resolve_target(message)
-        if not target:
-            return await utils.answer(message, self.strings["no_reply"])
-
-        extra = self._get_args_after_target(message, bool(reply))
-        reason = " ".join(extra) if extra else "не указана"
-
+    @loader.command(ru_doc="<reply/id> - Кикнуть пользователя из чата")
+    async def kickcmd(self, message):
+        user = await self._get_user(message, utils.get_args_raw(message))
+        if not user:
+            return await utils.answer(message, self.strings("need_reply"))
         try:
-            await self._client(
-                EditBannedRequest(
-                    message.peer_id,
-                    target.id,
-                    ChatBannedRights(
-                        until_date=None,
-                        view_messages=True,
-                        send_messages=True,
-                    ),
-                )
-            )
-            name = utils.get_display_name(target)
-            await utils.answer(
-                message,
-                self.strings["ban_ok"].format(name, target.id, reason),
-            )
-        except (ChatAdminRequiredError, UserAdminInvalidError):
-            await utils.answer(message, self.strings["no_rights"])
-        except Exception as e:
-            await utils.answer(message, self.strings["error"].format(str(e)))
+            await message.client.kick_participant(message.chat_id, user)
+            await utils.answer(message, "<b>✅ Пользователь кикнут!</b>")
+        except ChatAdminRequiredError:
+            await utils.answer(message, self.strings("not_admin"))
 
-    @loader.command(ru_doc="Разбанить пользователя: .разбан [reply/@user/id]")
-    async def разбанcmd(self, message):
-        if not await self._is_supergroup(message):
-            return await utils.answer(message, self.strings["not_supergroup"])
-        if not await self._is_chat_admin(message):
-            return await utils.answer(message, self.strings["not_admin"])
-
-        target = await self._resolve_target(message)
-        if not target:
-            return await utils.answer(message, self.strings["no_reply"])
+    @loader.command(ru_doc="Закрыть чат (запретить отправку сообщений всем)")
+    async def lockcmd(self, message):
         try:
-            await self._client(
-                EditBannedRequest(
-                    message.peer_id,
-                    target.id,
-                    ChatBannedRights(until_date=None),
-                )
-            )
-            await utils.answer(
-                message,
-                self.strings["unban_ok"].format(utils.get_display_name(target)),
-            )
-        except Exception as e:
-            await utils.answer(message, self.strings["error"].format(str(e)))
+            await message.client.edit_permissions(message.chat_id, send_messages=False)
+            await utils.answer(message, "<b>🔒 Чат закрыт!</b>")
+        except ChatAdminRequiredError:
+            await utils.answer(message, self.strings("not_admin"))
 
-    @loader.command(
-        ru_doc="Замьютить: .мут [reply/@user/id] [время: 30м/2ч/1д] [причина]"
-    )
-    async def мутcmd(self, message):
-        if not await self._is_supergroup(message):
-            return await utils.answer(message, self.strings["not_supergroup"])
-        if not await self._is_chat_admin(message):
-            return await utils.answer(message, self.strings["not_admin"])
-
-        reply = await message.get_reply_message()
-        target = await self._resolve_target(message)
-        if not target:
-            return await utils.answer(message, self.strings["no_reply"])
-
-        extra = self._get_args_after_target(message, bool(reply))
-        duration_secs = 0
-        reason = "не указана"
-        if extra:
-            if parse_time(extra[0]):
-                duration_secs = parse_time(extra[0])
-                reason = " ".join(extra[1:]) if len(extra) > 1 else "не указана"
-            else:
-                reason = " ".join(extra)
-
+    @loader.command(ru_doc="Открыть чат")
+    async def unlockcmd(self, message):
         try:
-            await self._client(
-                EditBannedRequest(
-                    message.peer_id,
-                    target.id,
-                    ChatBannedRights(
-                        until_date=time_until(duration_secs),
-                        send_messages=True,
-                        send_media=True,
-                        send_stickers=True,
-                        send_gifs=True,
-                        send_games=True,
-                        send_inline=True,
-                        embed_links=True,
-                    ),
-                )
-            )
-            await utils.answer(
-                message,
-                self.strings["mute_ok"].format(
-                    utils.get_display_name(target),
-                    fmt_time(duration_secs),
-                    reason,
-                ),
-            )
-        except (ChatAdminRequiredError, UserAdminInvalidError):
-            await utils.answer(message, self.strings["no_rights"])
-        except Exception as e:
-            await utils.answer(message, self.strings["error"].format(str(e)))
+            await message.client.edit_permissions(message.chat_id, send_messages=True)
+            await utils.answer(message, "<b>🔓 Чат открыт!</b>")
+        except ChatAdminRequiredError:
+            await utils.answer(message, self.strings("not_admin"))
 
-    @loader.command(ru_doc="Размьютить: .размут [reply/@user/id]")
-    async def размутcmd(self, message):
-        if not await self._is_supergroup(message):
-            return await utils.answer(message, self.strings["not_supergroup"])
-        if not await self._is_chat_admin(message):
-            return await utils.answer(message, self.strings["not_admin"])
-
-        target = await self._resolve_target(message)
-        if not target:
-            return await utils.answer(message, self.strings["no_reply"])
+    @loader.command(ru_doc="<reply/id> <1-5> - Выдать админку указанного уровня")
+    async def setadmcmd(self, message):
+        args = utils.get_args_raw(message).split()
+        user = await self._get_user(message, args[0] if len(args) > 0 else "")
+        
+        if not user:
+            return await utils.answer(message, self.strings("need_reply"))
+        
+        level = args[-1] if args else None
+        if not level or not level.isdigit() or not (1 <= int(level) <= 5):
+            return await utils.answer(message, self.strings("lvl_invalid"))
+            
+        rights_str = self.config[f"lvl{level}"]
+        rights_list = [r.strip() for r in rights_str.split(",")]
+        
+        admin_kwargs = {
+            "change_info": "change_info" in rights_list,
+            "post_messages": "post_messages" in rights_list,
+            "edit_messages": "edit_messages" in rights_list,
+            "delete_messages": "delete_messages" in rights_list,
+            "ban_users": "ban_users" in rights_list,
+            "invite_users": "invite_users" in rights_list,
+            "pin_messages": "pin_messages" in rights_list,
+            "add_admins": "add_admins" in rights_list,
+            "manage_call": "manage_call" in rights_list,
+            "anonymous": "anonymous" in rights_list,
+            "title": f"Admin Lvl {level}"
+        }
+        
         try:
-            await self._client(
-                EditBannedRequest(
-                    message.peer_id,
-                    target.id,
-                    ChatBannedRights(until_date=None),
-                )
-            )
-            await utils.answer(
-                message,
-                self.strings["unmute_ok"].format(utils.get_display_name(target)),
-            )
-        except Exception as e:
-            await utils.answer(message, self.strings["error"].format(str(e)))
+            await message.client.edit_admin(message.chat_id, user, **admin_kwargs)
+            await utils.answer(message, f"<b>✅ Выдана админка {level} уровня!</b>\n⚙️ <i>Права: {rights_str}</i>")
+        except ChatAdminRequiredError:
+            await utils.answer(message, self.strings("not_admin"))
 
-    @loader.command(ru_doc="Кикнуть пользователя: .кик [reply/@user/id] [причина]")
-    async def кикcmd(self, message):
-        if not await self._is_supergroup(message):
-            return await utils.answer(message, self.strings["not_supergroup"])
-        if not await self._is_chat_admin(message):
-            return await utils.answer(message, self.strings["not_admin"])
+    @loader.command(ru_doc="<1d/7d/1m/all> - Топ 600 активных пользователей")
+    async def topcmd(self, message):
+        args = utils.get_args_raw(message).lower()
+        if args not in ["1d", "7d", "1m", "all"]:
+            return await utils.answer(message, self.strings("invalid_period"))
+            
+        await utils.answer(message, self.strings("top_processing"))
+        
+        now = datetime.datetime.now(datetime.timezone.utc)
+        limit_date = None
+        if args == "1d": limit_date = now - datetime.timedelta(days=1)
+        elif args == "7d": limit_date = now - datetime.timedelta(days=7)
+        elif args == "1m": limit_date = now - datetime.timedelta(days=30)
+        
+        counts = {}
+        async for msg in message.client.iter_messages(message.chat_id):
+            if limit_date and msg.date < limit_date:
+                break # Прерываем цикл, когда доходим до старых сообщений
+            if msg.sender_id:
+                counts[msg.sender_id] = counts.get(msg.sender_id, 0) + 1
+                
+        sorted_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:600]
+        
+        text = f"<b>🏆 Топ активных ({args}):</b>\n\n"
+        for i, (uid, count) in enumerate(sorted_counts, 1):
+            text += f"<b>{i}.</b> <code>{uid}</code> — {count} сообщ.\n"
+            
+        if len(text) > 4096:
+            file = io.BytesIO(text.encode('utf-8'))
+            file.name = f"top_{args}.txt"
+            await message.client.send_file(message.chat_id, file, caption=f"<b>🏆 Топ активных ({args})</b>")
+            await message.delete()
+        else:
+            await utils.answer(message, text)
 
-        reply = await message.get_reply_message()
-        target = await self._resolve_target(message)
-        if not target:
-            return await utils.answer(message, self.strings["no_reply"])
-
-        extra = self._get_args_after_target(message, bool(reply))
-        reason = " ".join(extra) if extra else "не указана"
-
-        try:
-            # Кик = временный бан без прав + снятие бана
-            await self._client(
-                EditBannedRequest(
-                    message.peer_id,
-                    target.id,
-                    ChatBannedRights(until_date=None, view_messages=True),
-                )
-            )
-            await asyncio.sleep(0.5)
-            await self._client(
-                EditBannedRequest(
-                    message.peer_id,
-                    target.id,
-                    ChatBannedRights(until_date=None),
-                )
-            )
-            await utils.answer(
-                message,
-                self.strings["kick_ok"].format(
-                    utils.get_display_name(target), reason
-                ),
-            )
-        except (ChatAdminRequiredError, UserAdminInvalidError):
-            await utils.answer(message, self.strings["no_rights"])
-        except Exception as e:
-            await utils.answer(message, self.strings["error"].format(str(e)))
-
-    @loader.command(ru_doc="Закрыть чат (только админы могут писать): .замок")
-    async def замокcmd(self, message):
-        if not await self._is_supergroup(message):
-            return await utils.answer(message, self.strings["not_supergroup"])
-        if not await self._is_chat_admin(message):
-            return await utils.answer(message, self.strings["not_admin"])
-        try:
-            await self._client(
-                EditChatDefaultBannedRightsRequest(
-                    peer=message.peer_id,
-                    banned_rights=ChatBannedRights(
-                        until_date=None,
-                        send_messages=True,
-                        send_media=True,
-                        send_stickers=True,
-                        send_gifs=True,
-                        send_games=True,
-                        send_inline=True,
-                        embed_links=True,
-                    ),
-                )
-            )
-            await utils.answer(message, self.strings["lock_ok"])
-        except Exception as e:
-            await utils.answer(message, self.strings["error"].format(str(e)))
-
-    @loader.command(ru_doc="Открыть чат: .открыть")
-    async def открытьcmd(self, message):
-        if not await self._is_supergroup(message):
-            return await utils.answer(message, self.strings["not_supergroup"])
-        if not await self._is_chat_admin(message):
-            return await utils.answer(message, self.strings["not_admin"])
-        try:
-            await self._client(
-                EditChatDefaultBannedRightsRequest(
-                    peer=message.peer_id,
-                    banned_rights=ChatBannedRights(until_date=None),
-                )
-            )
-            await utils.answer(message, self.strings["unlock_ok"])
-        except Exception as e:
-            await utils.answer(message, self.strings["error"].format(str(e)))
-
-    # ═══════════════════════════════════════
-    #   ТОП АКТИВНОСТИ
-    # ═══════════════════════════════════════
-
-    @loader.command(
-        ru_doc=(
-            "Топ 600 активных за период: .топ\n"
-            "Выбор периода через inline-кнопки"
+    @loader.command(ru_doc="Статистика сообщений чата (1d, 1m, все время)")
+    async def statscmd(self, message):
+        await utils.answer(message, self.strings("top_processing"))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        date_1d = now - datetime.timedelta(days=1)
+        date_1m = now - datetime.timedelta(days=30)
+        
+        count_1d = 0
+        count_1m = 0
+        
+        # Считаем только за последний месяц, чтобы не парсить весь чат
+        async for msg in message.client.iter_messages(message.chat_id):
+            if msg.date < date_1m:
+                break
+            count_1m += 1
+            if msg.date >= date_1d:
+                count_1d += 1
+                
+        # Получаем общее количество моментально (хитрость Telethon)
+        count_all = (await message.client.get_messages(message.chat_id, limit=1)).total
+                
+        text = (
+            "<b>📊 Статистика сообщений чата:</b>\n\n"
+            f"▫️ <b>За сутки (1d):</b> {count_1d}\n"
+            f"▫️ <b>За месяц (1m):</b> {count_1m}\n"
+            f"▫️ <b>За все время:</b> {count_all}"
         )
-    )
-    async def топcmd(self, message):
-        chat_id = utils.get_chat_id(message)
-
-        async def _show_top(period_label: str, since_ts: int | None, call=None):
-            data = self._get_msgs(chat_id)
-            if since_ts:
-                data = [e for e in data if e[1] >= since_ts]
-
-            if not data:
-                text = self.strings["top_empty"]
-            else:
-                # Подсчёт по user_id
-                counts: dict[int, int] = {}
-                for uid, _ in data:
-                    counts[uid] = counts.get(uid, 0) + 1
-
-                top = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:600]
-
-                rows = []
-                medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-                for pos, (uid, cnt) in enumerate(top, 1):
-                    try:
-                        user_ent = await self._client.get_entity(uid)
-                        name = utils.get_display_name(user_ent)
-                    except Exception:
-                        name = f"id{uid}"
-                    medal = medals.get(pos, str(pos))
-                    rows.append(
-                        self.strings["top_row"].format(
-                            pos=medal, name=name, count=cnt
-                        )
-                    )
-
-                text = self.strings["top_header"].format(period_label)
-                text += "".join(rows)
-
-            if call:
-                await call.edit(text)
-            else:
-                await utils.answer(message, text)
-
-        now = now_ts()
-        periods = [
-            ("1 день",    now - 86400),
-            ("7 дней",   now - 86400 * 7),
-            ("Месяц",    now - 86400 * 30),
-            ("Всё время", None),
-        ]
-
-        await self.inline.form(
-            message=message,
-            text="📊 <b>Выберите период для топа активности:</b>",
-            reply_markup=[
-                [
-                    {
-                        "text": label,
-                        "callback": lambda c, l=label, s=since: _show_top(l, s, c),
-                    }
-                    for label, since in row
-                ]
-                for row in [periods[:2], periods[2:]]
-            ],
-        )
-
-    # ═══════════════════════════════════════
-    #   СТАТИСТИКА СООБЩЕНИЙ
-    # ═══════════════════════════════════════
-
-    @loader.command(ru_doc="Статистика сообщений чата: .статс")
-    async def статсcmd(self, message):
-        chat_id = utils.get_chat_id(message)
-        data = self._get_msgs(chat_id)
-        now = now_ts()
-
-        day_count = sum(1 for _, ts in data if ts >= now - 86400)
-        month_count = sum(1 for _, ts in data if ts >= now - 86400 * 30)
-        total = len(data)
-
-        await utils.answer(
-            message,
-            self.strings["stats"].format(
-                day=day_count,
-                month=month_count,
-                total=total,
-            ),
-        )
-
-    # ═══════════════════════════════════════
-    #   СИСТЕМА АДМИНИСТРАТОРОВ
-    # ═══════════════════════════════════════
-
-    @loader.command(
-        ru_doc="Выдать/обновить администратора: .повыс [reply/@user/id] [1-5]"
-    )
-    async def повысcmd(self, message):
-        if not await self._is_supergroup(message):
-            return await utils.answer(message, self.strings["not_supergroup"])
-        if not await self._is_chat_admin(message):
-            return await utils.answer(message, self.strings["not_admin"])
-
-        reply = await message.get_reply_message()
-        target = await self._resolve_target(message)
-        if not target:
-            return await utils.answer(message, self.strings["no_reply"])
-
-        extra = self._get_args_after_target(message, bool(reply))
-        if not extra or not extra[-1].isdigit():
-            return await utils.answer(
-                message,
-                "❌ <b>Укажите уровень (1-5):</b> <code>.повыс [пользователь] [1-5]</code>",
-            )
-
-        level = int(extra[-1])
-        if level < 1 or level > 5:
-            return await utils.answer(message, self.strings["level_invalid"])
-
-        # Нельзя выдать выше 5-го (add_admins нет ни у одного — защита)
-        rights_dict = self._get_level_rights(level)
-        rights = ChatAdminRights(**rights_dict)
-
-        try:
-            title = f"Admin Lv.{level}"
-            await self._client(
-                EditAdminRequest(
-                    channel=message.peer_id,
-                    user_id=target.id,
-                    admin_rights=rights,
-                    rank=title,
-                )
-            )
-            chat_id = utils.get_chat_id(message)
-            admins = self._get_admins(chat_id)
-            admins[str(target.id)] = level
-            self._save_admins(chat_id, admins)
-
-            rights_text = ", ".join(
-                k for k, v in rights_dict.items() if v
-            ) or "нет особых прав"
-
-            await utils.answer(
-                message,
-                self.strings["promote_ok"].format(
-                    name=utils.get_display_name(target),
-                    level=f"{LEVEL_NAMES[level]} (уровень {level})",
-                    rights=rights_text,
-                ),
-            )
-        except (ChatAdminRequiredError, UserAdminInvalidError):
-            await utils.answer(message, self.strings["no_rights"])
-        except Exception as e:
-            await utils.answer(message, self.strings["error"].format(str(e)))
-
-    @loader.command(ru_doc="Снять администратора: .понис [reply/@user/id]")
-    async def понисcmd(self, message):
-        if not await self._is_supergroup(message):
-            return await utils.answer(message, self.strings["not_supergroup"])
-        if not await self._is_chat_admin(message):
-            return await utils.answer(message, self.strings["not_admin"])
-
-        target = await self._resolve_target(message)
-        if not target:
-            return await utils.answer(message, self.strings["no_reply"])
-
-        try:
-            await self._client(
-                EditAdminRequest(
-                    channel=message.peer_id,
-                    user_id=target.id,
-                    admin_rights=ChatAdminRights(),
-                    rank="",
-                )
-            )
-            chat_id = utils.get_chat_id(message)
-            admins = self._get_admins(chat_id)
-            admins.pop(str(target.id), None)
-            self._save_admins(chat_id, admins)
-
-            await utils.answer(
-                message,
-                self.strings["demote_ok"].format(
-                    utils.get_display_name(target)
-                ),
-            )
-        except Exception as e:
-            await utils.answer(message, self.strings["error"].format(str(e)))
-
-    # ═══════════════════════════════════════
-    #   НАСТРОЙКА ПРАВ УРОВНЕЙ
-    # ═══════════════════════════════════════
-
-    @loader.command(
-        ru_doc=(
-            "Настроить права уровня: .настроить [1-5] [право=вкл/выкл]\n"
-            "Без аргументов — показать текущие права уровня"
-        )
-    )
-    async def настроитьcmd(self, message):
-        args = utils.get_args_raw(message).strip().split()
-
-        if not args:
-            return await utils.answer(message, self.strings["config_usage"])
-
-        if not args[0].isdigit() or int(args[0]) not in range(1, 6):
-            return await utils.answer(message, self.strings["level_invalid"])
-
-        level = int(args[0])
-        current = self._get_level_rights(level)
-
-        # Только просмотр
-        if len(args) == 1:
-            lines = "\n".join(
-                f"  {'✅' if v else '❌'} <code>{k}</code>"
-                for k, v in current.items()
-            )
-            return await utils.answer(
-                message, self.strings["config_header"].format(level, lines)
-            )
-
-        # Обновление прав
-        valid_keys = set(LEVEL_RIGHTS[1].keys())
-        errors = []
-        for pair in args[1:]:
-            if "=" not in pair:
-                errors.append(pair)
-                continue
-            key, val = pair.split("=", 1)
-            key = key.strip().lower()
-            val = val.strip().lower()
-            if key not in valid_keys:
-                errors.append(f"неизвестное право: {key}")
-                continue
-            if val in ("1", "вкл", "true", "on", "да"):
-                current[key] = True
-            elif val in ("0", "выкл", "false", "off", "нет"):
-                current[key] = False
-            else:
-                errors.append(f"неверное значение для {key}: {val}")
-
-        # add_admins всегда False — защита от эскалации прав
-        current["add_admins"] = False
-
-        self._db.set(
-            self.strings["name"], self._level_cfg_key(level), current
-        )
-
-        text = self.strings["config_saved"].format(level)
-        if errors:
-            text += f"\n⚠️ Ошибки: {', '.join(errors)}"
         await utils.answer(message, text)
