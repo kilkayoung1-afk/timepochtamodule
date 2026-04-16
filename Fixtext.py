@@ -1,43 +1,31 @@
 # meta developer: @Kilka_Young
-# meta banner: https://imgur.com/a/grammar-fix
+# meta banner: https://i.imgur.com/JQpVpNg.jpeg
+# requires: aiohttp
 
-import re
+import aiohttp
 from hikkatl.types import Message
 from .. import loader, utils
 
-import aiohttp
-
 
 @loader.tds
-class GrammarFixMod(loader.Module):
+class FixTextMod(loader.Module):
     """Исправляет грамматические и орфографические ошибки в тексте. By @Kilka_Young"""
 
     strings = {
-        "name": "GrammarFix",
-        "no_text": "❌ <b>Нет текста для проверки.</b> Используй реплай или напиши текст после команды.",
+        "name": "FixText",
+        "no_text": (
+            "❌ <b>Нет текста для проверки.</b>\n"
+            "Используй реплай на сообщение или напиши текст после команды."
+        ),
         "no_errors": "✅ <b>Ошибок не найдено!</b>",
-        "fixed": "✏️ <b>Исправлено:</b>\n<code>{}</code>",
+        "checking": "🔍 <b>Проверяю текст...</b>",
+        "api_error": "❌ <b>Ошибка API:</b> <code>{}</code>",
+        "fixed_short": "✏️ <b>Исправлено:</b>\n<code>{}</code>",
         "errors_found": (
             "📝 <b>Найдено ошибок:</b> {count}\n\n"
             "{details}\n\n"
             "✏️ <b>Исправленный текст:</b>\n<code>{fixed}</code>"
         ),
-        "api_error": "❌ <b>Ошибка API:</b> {}",
-        "checking": "🔍 <b>Проверяю текст...</b>",
-    }
-
-    strings_en = {
-        "name": "GrammarFix",
-        "no_text": "❌ <b>No text to check.</b> Reply to a message or write text after the command.",
-        "no_errors": "✅ <b>No errors found!</b>",
-        "fixed": "✏️ <b>Fixed:</b>\n<code>{}</code>",
-        "errors_found": (
-            "📝 <b>Errors found:</b> {count}\n\n"
-            "{details}\n\n"
-            "✏️ <b>Fixed text:</b>\n<code>{fixed}</code>"
-        ),
-        "api_error": "❌ <b>API error:</b> {}",
-        "checking": "🔍 <b>Checking text...</b>",
     }
 
     def __init__(self):
@@ -45,189 +33,175 @@ class GrammarFixMod(loader.Module):
             loader.ConfigValue(
                 "language",
                 "ru",
-                "Язык проверки (ru, en, uk, ...)",
+                lambda: "Язык проверки (ru, en, uk, de, fr ...)",
                 validator=loader.validators.String(),
             ),
             loader.ConfigValue(
                 "auto_edit",
                 True,
-                "Автоматически заменять текст на исправленный при .fix",
+                lambda: "Редактировать своё сообщение при .fix по реплаю",
                 validator=loader.validators.Boolean(),
             ),
         )
 
-    async def _check_text(self, text: str, lang: str) -> dict:
-        """Отправляет текст на проверку через LanguageTool API"""
-        url = "https://api.languagetool.org/v2/check"
-        payload = {
-            "text": text,
-            "language": lang,
-        }
+    async def _get_text(self, message: Message) -> str | None:
+        """Извлекает текст из аргументов или реплая"""
+        text = utils.get_args_raw(message)
+        if not text and message.is_reply:
+            reply = await message.get_reply_message()
+            if reply and reply.raw_text:
+                text = reply.raw_text
+        return text or None
 
+    async def _check_text(self, text: str) -> dict:
+        """Проверяет текст через LanguageTool API"""
+        url = "https://api.languagetool.org/v2/check"
+        data = {
+            "text": text,
+            "language": self.config["language"],
+        }
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as resp:
+            async with session.post(url, data=data) as resp:
                 if resp.status != 200:
                     return {"error": f"HTTP {resp.status}"}
                 return await resp.json()
 
-    def _apply_fixes(self, text: str, matches: list) -> str:
-        """Применяет исправления к тексту"""
-        # Сортируем по позиции с конца, чтобы замены не сбивали индексы
-        sorted_matches = sorted(matches, key=lambda m: m["offset"], reverse=True)
-
-        result = text
-        for match in sorted_matches:
-            offset = match["offset"]
-            length = match["length"]
+    @staticmethod
+    def _apply_fixes(text: str, matches: list) -> str:
+        """Применяет все исправления к тексту"""
+        # Сортировка с конца, чтобы замены не сбивали индексы
+        for match in sorted(matches, key=lambda m: m["offset"], reverse=True):
             replacements = match.get("replacements", [])
-
             if replacements:
-                # Берём первое (наиболее вероятное) исправление
-                replacement = replacements[0]["value"]
-                result = result[:offset] + replacement + result[offset + length:]
+                offset = match["offset"]
+                length = match["length"]
+                text = text[:offset] + replacements[0]["value"] + text[offset + length:]
+        return text
 
-        return result
-
-    def _format_details(self, matches: list) -> str:
-        """Форматирует детали ошибок"""
-        details = []
+    @staticmethod
+    def _format_details(matches: list) -> str:
+        """Форматирует список ошибок"""
+        lines = []
         for i, match in enumerate(matches, 1):
-            context = match.get("context", {})
-            original = context.get("text", "")[
-                context.get("offset", 0):context.get("offset", 0) + context.get("length", 0)
-            ]
+            ctx = match.get("context", {})
+            start = ctx.get("offset", 0)
+            end = start + ctx.get("length", 0)
+            original = ctx.get("text", "")[start:end]
+
             replacements = match.get("replacements", [])
             suggestion = replacements[0]["value"] if replacements else "—"
-            message = match.get("message", "")
+            msg = match.get("message", "")
 
-            details.append(
+            lines.append(
                 f"  {i}. <b>{original}</b> → <b>{suggestion}</b>\n"
-                f"      <i>{message}</i>"
+                f"      <i>{msg}</i>"
             )
+        return "\n".join(lines)
 
-        return "\n".join(details)
-
-    @loader.command(
-        ru_doc="[текст/реплай] — Найти ошибки и показать исправления",
-        en_doc="[text/reply] — Find errors and show fixes",
-    )
-    async def gramcmd(self, message: Message):
-        """[text/reply] — Find errors and show detailed fixes"""
-        text = utils.get_args_raw(message)
-
-        if not text and message.is_reply:
-            reply = await message.get_reply_message()
-            text = reply.raw_text
-
+    async def _process(self, message: Message) -> tuple:
+        """Общая логика: получить текст → проверить → вернуть результат.
+        Возвращает (text, fixed_text, matches) или отвечает ошибкой и возвращает None."""
+        text = await self._get_text(message)
         if not text:
-            await utils.answer(message, self.strings("no_text"))
-            return
+            await utils.answer(message, self.strings["no_text"])
+            return None
 
-        await utils.answer(message, self.strings("checking"))
+        await utils.answer(message, self.strings["checking"])
 
         try:
-            result = await self._check_text(text, self.config["language"])
+            result = await self._check_text(text)
         except Exception as e:
-            await utils.answer(message, self.strings("api_error").format(str(e)))
-            return
+            await utils.answer(message, self.strings["api_error"].format(e))
+            return None
 
         if "error" in result:
-            await utils.answer(message, self.strings("api_error").format(result["error"]))
-            return
+            await utils.answer(message, self.strings["api_error"].format(result["error"]))
+            return None
 
         matches = result.get("matches", [])
-
         if not matches:
-            await utils.answer(message, self.strings("no_errors"))
+            await utils.answer(message, self.strings["no_errors"])
+            return None
+
+        fixed = self._apply_fixes(text, matches)
+        return text, fixed, matches
+
+    @loader.command(
+        ru_doc="[текст/реплай] — Подробный разбор ошибок с исправлением",
+    )
+    async def gramcmd(self, message: Message):
+        """[text/reply] — Detailed error analysis"""
+        data = await self._process(message)
+        if data is None:
             return
 
-        fixed_text = self._apply_fixes(text, matches)
+        _, fixed, matches = data
         details = self._format_details(matches)
 
         await utils.answer(
             message,
-            self.strings("errors_found").format(
+            self.strings["errors_found"].format(
                 count=len(matches),
                 details=details,
-                fixed=fixed_text,
+                fixed=fixed,
             ),
         )
 
     @loader.command(
-        ru_doc="[текст/реплай] — Исправить текст и заменить сообщение",
-        en_doc="[text/reply] — Fix text and replace the message",
+        ru_doc="[текст/реплай] — Исправить текст (авто-редактирование своего сообщения)",
     )
     async def fixcmd(self, message: Message):
-        """[text/reply] — Fix text and auto-edit message"""
+        """[text/reply] — Fix text and auto-edit your message"""
         text = utils.get_args_raw(message)
         reply = None
 
         if not text and message.is_reply:
             reply = await message.get_reply_message()
-            text = reply.raw_text
+            if reply and reply.raw_text:
+                text = reply.raw_text
 
         if not text:
-            await utils.answer(message, self.strings("no_text"))
+            await utils.answer(message, self.strings["no_text"])
             return
 
-        await utils.answer(message, self.strings("checking"))
+        await utils.answer(message, self.strings["checking"])
 
         try:
-            result = await self._check_text(text, self.config["language"])
+            result = await self._check_text(text)
         except Exception as e:
-            await utils.answer(message, self.strings("api_error").format(str(e)))
+            await utils.answer(message, self.strings["api_error"].format(e))
             return
 
         if "error" in result:
-            await utils.answer(message, self.strings("api_error").format(result["error"]))
+            await utils.answer(message, self.strings["api_error"].format(result["error"]))
             return
 
         matches = result.get("matches", [])
-
         if not matches:
-            await utils.answer(message, self.strings("no_errors"))
+            await utils.answer(message, self.strings["no_errors"])
             return
 
-        fixed_text = self._apply_fixes(text, matches)
+        fixed = self._apply_fixes(text, matches)
 
+        # Если реплай на своё сообщение — редактируем оригинал
         if self.config["auto_edit"] and reply and reply.out:
-            # Если реплай на своё сообщение — редактируем его
             try:
-                await reply.edit(fixed_text)
+                await reply.edit(fixed)
                 await message.delete()
                 return
             except Exception:
                 pass
 
-        await utils.answer(message, self.strings("fixed").format(fixed_text))
+        await utils.answer(message, self.strings["fixed_short"].format(fixed))
 
     @loader.command(
         ru_doc="[текст/реплай] — Быстрое исправление (только результат)",
-        en_doc="[text/reply] — Quick fix (result only)",
     )
     async def qfixcmd(self, message: Message):
-        """[text/reply] — Quick fix, outputs only corrected text"""
-        text = utils.get_args_raw(message)
-
-        if not text and message.is_reply:
-            reply = await message.get_reply_message()
-            text = reply.raw_text
-
-        if not text:
-            await utils.answer(message, self.strings("no_text"))
+        """[text/reply] — Quick fix, outputs corrected text only"""
+        data = await self._process(message)
+        if data is None:
             return
 
-        try:
-            result = await self._check_text(text, self.config["language"])
-        except Exception as e:
-            await utils.answer(message, self.strings("api_error").format(str(e)))
-            return
-
-        matches = result.get("matches", [])
-
-        if not matches:
-            await utils.answer(message, self.strings("no_errors"))
-            return
-
-        fixed_text = self._apply_fixes(text, matches)
-        await utils.answer(message, fixed_text)
+        _, fixed, _ = data
+        await utils.answer(message, fixed)
