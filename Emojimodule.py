@@ -1,17 +1,16 @@
+# meta developer: @Kilka_Young
+
 import os
 from PIL import Image, ImageDraw, ImageFont
 
-# ===== НАСТРОЙКИ =====
+OUTPUT_DIR = "emojis"
 TEMPLATE_PATH = "template.png"
 FONT_PATH = "font.ttf"
-OUTPUT_DIR = "emojis"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ===== ГЕНЕРАЦИЯ =====
-def generate_emojis(text):
-    files = []
 
+def generate_emojis(text):
     for i in range(49):
         img = Image.open(TEMPLATE_PATH).convert("RGBA")
         draw = ImageDraw.Draw(img)
@@ -29,33 +28,30 @@ def generate_emojis(text):
             fill=(255, 255, 255)
         )
 
-        path = f"{OUTPUT_DIR}/emoji_{i+1}.png"
-        img.save(path)
-        files.append(path)
-
-    return files
+        img.save(f"{OUTPUT_DIR}/emoji_{i+1}.png")
 
 
-# ===== ИНСТРУКЦИЯ =====
-def print_guide():
-    print("\n📦 Эмодзи готовы!")
-    print("\n👉 Дальше делай так:")
-    print("1. Открой Telegram")
-    print("2. Найди бота @Stickers")
-    print("3. Отправь /newemojipack")
-    print("4. Введи название пака")
-    print("5. Загрузи все 49 файлов из папки emojis")
-    print("6. Отправь любой эмодзи (например 🙂)")
-    print("7. В конце отправь /publish")
-    print("\n🔗 Получишь ссылку вида:")
-    print("https://t.me/addemoji/your_pack_name\n")
+# ===== ГЛАВНАЯ ФУНКЦИЯ МОДУЛЯ =====
+def register(module_name):
 
+    class EmojiModule:
+        strings = {"name": "EmojiGenerator"}
 
-# ===== ЗАПУСК =====
-if __name__ == "__main__":
-    text = input("Введите текст для эмодзи: ")
+        async def emoji(self, message):
+            args = message.text.split(maxsplit=1)
 
-    print("🎨 Генерация...")
-    generate_emojis(text)
+            if len(args) < 2:
+                await message.reply("❌ Введи текст: .emoji TEXT")
+                return
 
-    print_guide()
+            text = args[1]
+
+            generate_emojis(text)
+
+            await message.reply(
+                "✅ Готово!\n"
+                "📂 Эмодзи в папке emojis/\n"
+                "👉 Загрузи через @Stickers"
+            )
+
+    return EmojiModule()
