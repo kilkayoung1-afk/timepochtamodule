@@ -1,194 +1,231 @@
-# meta developer: @Kilka_Young
-# meta description: Продвинутый модуль модерации чатов с системой уровней и статистикой
+import sqlite3
+from datetime import datetime, timedelta
+import telebot
+from telebot.types import Message, ChatMember
 
-import datetime
-import io
-from telethon.errors import ChatAdminRequiredError
-from .. import loader, utils
+# Инициализация бота (предполагается, что он передается из основного файла)
+# bot = telebot.TeleBot('YOUR_BOT_TOKEN')
 
-@loader.tds
-class HerokuModeratorMod(loader.Module):
-    """Модуль для модерации чатов с рангами и статистикой"""
-    strings = {
-        "name": "HerokuModerator",
-        "not_admin": "<b>❌ Я не администратор в этом чате или мне не хватает прав!</b>",
-        "need_reply": "<b>❌ Ответь на сообщение пользователя или укажи его ID/username!</b>",
-        "lvl_invalid": "<b>❌ Укажи корректный уровень админки (от 1 до 5)!</b>",
-        "top_processing": "<b>⏳ Собираю данные... Это может занять немного времени.</b>",
-        "invalid_period": "<b>❌ Укажи доступный период: 1d, 7d, 1m, all</b>"
-    }
+# Путь к файлу базы данных
+DB_NAME = 'moderation.db'
 
-    def __init__(self):
-        self.config = loader.ModuleConfig(
-            "lvl1", "delete_messages", "Права для 1 уровня (через запятую)",
-            "lvl2", "delete_messages, ban_users", "Права для 2 уровня",
-            "lvl3", "delete_messages, ban_users, pin_messages, invite_users", "Права для 3 уровня",
-            "lvl4", "delete_messages, ban_users, pin_messages, invite_users, change_info, manage_call", "Права для 4 уровня",
-            "lvl5", "delete_messages, ban_users, pin_messages, invite_users, change_info, manage_call, add_admins", "Права для 5 уровня"
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    # Таблица статистики сообщений
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            user_id INTEGER,
+            message TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Таблица админов
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS admins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            user_id INTEGER,
+            level INTEGER CHECK(level >= 1 AND level <= 5)
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+
+def is_admin(bot, chat_id, user_id):
+    try:
+        status = bot.get_chat_member(chat_id, user_id).status
+        return status in ['administrator', 'creator']
+    except Exception:
+        return False
+
+def log_message(chat_id, user_id, message_text):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(        "INSERT INTO messages (chat_id, user_id, message) VALUES (?, ?, ?)",
+        (chat_id, user_id, message_text)
+    )
+    conn.commit()
+    conn.close()
+
+def get_stats(chat_id, period):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    now = datetime.now()
+    if period == 'day':
+        since = now - timedelta(days=1)
+    elif period == 'week':
+        since = now - timedelta(weeks=1)
+    elif period == 'month':
+        since = now - timedelta(days=30)
+    else:  # 'all'
+        since = datetime.min
+
+    cursor.execute(
+        '''
+        SELECT COUNT(*) FROM messages
+        WHERE chat_id = ? AND timestamp > ?
+        ''',
+        (chat_id, since)
+    )
+    result = cursor.fetchone()[0]
+    conn.close()
+    return result
+
+def get_top_users(chat_id, period, limit=600):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    now = datetime.now()
+    if period == 'day':
+        since = now - timedelta(days=1)
+    elif period == 'week':
+        since = now - timedelta(weeks=1)
+    elif period == 'month':
+        since = now - timedelta(days=30)
+    else:  # 'all'
+        since = datetime.min
+
+    cursor.execute(
+        '''
+        SELECT user_id, COUNT(*) as msg_count FROM messages
+        WHERE chat_id = ? AND timestamp > ?
+        GROUP BY user_id        ORDER BY msg_count DESC
+        LIMIT ?
+        ''',
+        (chat_id, since, limit)
+    )
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
+def register_handlers(bot):
+
+    @bot.message_handler(commands=['start'])
+    def send_welcome(message: Message):
+        if not is_admin(bot, message.chat.id, message.from_user.id):
+            bot.reply_to(message, "❌ Эта команда доступна только администраторам.")
+            return
+        bot.reply_to(message, "✅ Привет, администратор!")
+
+    @bot.message_handler(commands=['ban'])
+    def cmd_ban(message: Message):
+        if not is_admin(bot, message.chat.id, message.from_user.id):
+            bot.reply_to(message, "❌ Только администратор может использовать эту команду.")
+            return
+        if not message.reply_to_message:
+            bot.reply_to(message, "❌ Ответьте на сообщение пользователя, которого хотите забанить.")
+            return
+
+        target_user = message.reply_to_message.from_user
+        reason = " ".join(message.text.split()[1:]) or "Не указана"
+        try:
+            bot.ban_chat_member(message.chat.id, target_user.id)
+            bot.reply_to(message, f"✅ Пользователь {target_user.first_name} заблокирован.\nПричина: {reason}")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Ошибка: {e}")
+
+    @bot.message_handler(commands=['mute'])
+    def cmd_mute(message: Message):
+        if not is_admin(bot, message.chat.id, message.from_user.id):
+            bot.reply_to(message, "❌ Только администратор может использовать эту команду.")
+            return
+        if not message.reply_to_message:
+            bot.reply_to(message, "❌ Ответьте на сообщение пользователя, которого хотите замутить.")
+            return
+
+        target_user = message.reply_to_message.from_user
+        reason = " ".join(message.text.split()[2:]) or "Не указана"
+        duration_str = message.text.split()[1] if len(message.text.split()) > 1 else None
+
+        if not duration_str:
+            bot.reply_to(message, "❌ Укажите время (например, 1h, 30m, 1d).")            return
+
+        duration = parse_time(duration_str)
+        if not duration:
+            bot.reply_to(message, "❌ Неверный формат времени.")
+            return
+
+        until_date = datetime.now() + duration
+        try:
+            bot.restrict_chat_member(
+                message.chat.id,
+                target_user.id,
+                until_date=until_date.timestamp(),
+                can_send_messages=False
+            )
+            bot.reply_to(message, f"🔇 Пользователь {target_user.first_name} замучен на {duration_str}.\nПричина: {reason}")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Ошибка: {e}")
+
+    @bot.message_handler(commands=['stats'])
+    def cmd_stats(message: Message):
+        if not is_admin(bot, message.chat.id, message.from_user.id):
+            bot.reply_to(message, "❌ Только администратор может использовать эту команду.")
+            return
+
+        day = get_stats(message.chat.id, 'day')
+        month = get_stats(message.chat.id, 'month')
+        total = get_stats(message.chat.id, 'all')
+
+        bot.reply_to(
+            message,
+            f"""
+📊 Статистика сообщений в чате:
+
+🔹 За 24 часа: {day}
+🔹 За 30 дней: {month}
+🔹 За всё время: {total}
+            """
         )
 
-    async def _get_user(self, message, args):
-        reply = await message.get_reply_message()
-        if reply:
-            return reply.sender_id
-        if args:
-            try:
-                user = await message.client.get_entity(args.split()[0])
-                return user.id
-            except Exception:
-                pass
+    @bot.message_handler(commands=['top'])
+    def cmd_top(message: Message):
+        if not is_admin(bot, message.chat.id, message.from_user.id):
+            bot.reply_to(message, "❌ Только администратор может использовать эту команду.")
+            return
+
+        args = message.text.split()
+        if len(args) < 2:
+            bot.reply_to(message, "❌ Укажите период: day / week / month / all")
+            return
+        period = args[1].lower()
+        if period not in ['day', 'week', 'month', 'all']:
+            bot.reply_to(message, "❌ Неверный период. Используйте: day / week / month / all")
+            return
+
+        top_list = get_top_users(message.chat.id, period)
+
+        if not top_list:
+            bot.reply_to(message, "❌ Нет данных для отображения.")
+            return
+
+        top_str = "\n".join([
+            f"{i+1}. [{u[0]}](tg://user?id={u[0]}): {u[1]} сообщений"
+            for i, u in enumerate(top_list)
+        ])
+        bot.reply_to(
+            message,
+            f"🏆 Топ-600 за {period}:\n\n{top_str}",
+            parse_mode="Markdown"
+        )
+
+def parse_time(time_str):
+    # Пример: 1h, 30m, 1d
+    num = int(time_str[:-1])
+    unit = time_str[-1]
+
+    if unit == 'm':
+        return timedelta(minutes=num)
+    elif unit == 'h':
+        return timedelta(hours=num)
+    elif unit == 'd':
+        return timedelta(days=num)
+    else:
         return None
-
-    @loader.command()
-    async def bancmd(self, message):
-        """<reply/id> - Забанить пользователя"""
-        user = await self._get_user(message, utils.get_args_raw(message))
-        if not user:
-            return await utils.answer(message, self.strings("need_reply", message))
-        try:
-            await message.client.edit_permissions(message.chat_id, user, view_messages=False)
-            await utils.answer(message, "<b>✅ Пользователь забанен!</b>")
-        except ChatAdminRequiredError:
-            await utils.answer(message, self.strings("not_admin", message))
-
-    @loader.command()
-    async def mutecmd(self, message):
-        """<reply/id> - Выдать мут пользователю"""
-        user = await self._get_user(message, utils.get_args_raw(message))
-        if not user:
-            return await utils.answer(message, self.strings("need_reply", message))
-        try:
-            await message.client.edit_permissions(message.chat_id, user, send_messages=False)
-            await utils.answer(message, "<b>✅ Пользователь отправлен в мут!</b>")
-        except ChatAdminRequiredError:
-            await utils.answer(message, self.strings("not_admin", message))
-
-    @loader.command()
-    async def kickcmd(self, message):
-        """<reply/id> - Кикнуть пользователя из чата"""
-        user = await self._get_user(message, utils.get_args_raw(message))
-        if not user:
-            return await utils.answer(message, self.strings("need_reply", message))
-        try:
-            await message.client.kick_participant(message.chat_id, user)
-            await utils.answer(message, "<b>✅ Пользователь кикнут!</b>")
-        except ChatAdminRequiredError:
-            await utils.answer(message, self.strings("not_admin", message))
-
-    @loader.command()
-    async def lockcmd(self, message):
-        """Закрыть чат (запретить отправку сообщений всем)"""
-        try:
-            await message.client.edit_permissions(message.chat_id, send_messages=False)
-            await utils.answer(message, "<b>🔒 Чат закрыт!</b>")
-        except ChatAdminRequiredError:
-            await utils.answer(message, self.strings("not_admin", message))
-
-    @loader.command()
-    async def unlockcmd(self, message):
-        """Открыть чат"""
-        try:
-            await message.client.edit_permissions(message.chat_id, send_messages=True)
-            await utils.answer(message, "<b>🔓 Чат открыт!</b>")
-        except ChatAdminRequiredError:
-            await utils.answer(message, self.strings("not_admin", message))
-
-    @loader.command()
-    async def setadmcmd(self, message):
-        """<reply/id> <1-5> - Выдать админку указанного уровня"""
-        args = utils.get_args_raw(message).split()
-        user = await self._get_user(message, args[0] if len(args) > 0 else "")
-        
-        if not user:
-            return await utils.answer(message, self.strings("need_reply", message))
-        
-        level = args[-1] if args else None
-        if not level or not level.isdigit() or not (1 <= int(level) <= 5):
-            return await utils.answer(message, self.strings("lvl_invalid", message))
-            
-        rights_str = self.config[f"lvl{level}"]
-        rights_list = [r.strip() for r in rights_str.split(",")]
-        
-        admin_kwargs = {
-            "change_info": "change_info" in rights_list,
-            "post_messages": "post_messages" in rights_list,
-            "edit_messages": "edit_messages" in rights_list,
-            "delete_messages": "delete_messages" in rights_list,
-            "ban_users": "ban_users" in rights_list,
-            "invite_users": "invite_users" in rights_list,
-            "pin_messages": "pin_messages" in rights_list,
-            "add_admins": "add_admins" in rights_list,
-            "manage_call": "manage_call" in rights_list,
-            "anonymous": "anonymous" in rights_list,
-            "title": f"Admin Lvl {level}"
-        }
-        
-        try:
-            await message.client.edit_admin(message.chat_id, user, **admin_kwargs)
-            await utils.answer(message, f"<b>✅ Выдана админка {level} уровня!</b>\n⚙️ <i>Права: {rights_str}</i>")
-        except ChatAdminRequiredError:
-            await utils.answer(message, self.strings("not_admin", message))
-
-    @loader.command()
-    async def topcmd(self, message):
-        """<1d/7d/1m/all> - Топ 600 активных пользователей"""
-        args = utils.get_args_raw(message).lower()
-        if args not in ["1d", "7d", "1m", "all"]:
-            return await utils.answer(message, self.strings("invalid_period", message))
-            
-        await utils.answer(message, self.strings("top_processing", message))
-        
-        now = datetime.datetime.now(datetime.timezone.utc)
-        limit_date = None
-        if args == "1d": limit_date = now - datetime.timedelta(days=1)
-        elif args == "7d": limit_date = now - datetime.timedelta(days=7)
-        elif args == "1m": limit_date = now - datetime.timedelta(days=30)
-        
-        counts = {}
-        async for msg in message.client.iter_messages(message.chat_id):
-            if limit_date and msg.date < limit_date:
-                break
-            if msg.sender_id:
-                counts[msg.sender_id] = counts.get(msg.sender_id, 0) + 1
-                
-        sorted_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:600]
-        
-        text = f"<b>🏆 Топ активных ({args}):</b>\n\n"
-        for i, (uid, count) in enumerate(sorted_counts, 1):
-            text += f"<b>{i}.</b> <code>{uid}</code> — {count} сообщ.\n"
-            
-        if len(text) > 4096:
-            file = io.BytesIO(text.encode('utf-8'))
-            file.name = f"top_{args}.txt"
-            await message.client.send_file(message.chat_id, file, caption=f"<b>🏆 Топ активных ({args})</b>")
-            await message.delete()
-        else:
-            await utils.answer(message, text)
-
-    @loader.command()
-    async def statscmd(self, message):
-        """Статистика сообщений чата (1d, 1m, все время)"""
-        await utils.answer(message, self.strings("top_processing", message))
-        now = datetime.datetime.now(datetime.timezone.utc)
-        date_1d = now - datetime.timedelta(days=1)
-        date_1m = now - datetime.timedelta(days=30)
-        
-        count_1d = 0
-        count_1m = 0
-        
-        async for msg in message.client.iter_messages(message.chat_id):
-            if msg.date < date_1m:
-                break
-            count_1m += 1
-            if msg.date >= date_1d:
-                count_1d += 1
-                
-        count_all = (await message.client.get_messages(message.chat_id, limit=1)).total
-                
-        text = (
-            "<b>📊 Статистика сообщений чата:</b>\n\n"
-            f"▫️ <b>За сутки (1d):</b> {count_1d}\n"
-            f"▫️ <b>За месяц (1m):</b> {count_1m}\n"
-            f"▫️ <b>За все время:</b> {count_all}"
-        )
-        await utils.answer(message, text)
