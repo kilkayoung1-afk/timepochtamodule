@@ -30,7 +30,7 @@ class OnlySQMod(loader.Module):
             ),
             loader.ConfigValue(
                 "api_url",
-                "https://api.onlysq.ru/v1/chat/completions",
+                "https://api.onlysq.ru/ai/chat/completions",
                 "URL API endpoint",
                 validator=loader.validators.String()
             ),
@@ -64,67 +64,47 @@ class OnlySQMod(loader.Module):
         await utils.answer(message, self.strings["token_saved"])
     
     @loader.command()
-    async def sqfind(self, message):
-        """Автоматически найти правильный API endpoint"""
+    async def sqmodels(self, message):
+        """Получить список доступных моделей"""
         if not self.config["api_token"]:
             await utils.answer(message, self.strings["no_token"])
             return
         
-        await utils.answer(message, "🔍 <b>Ищу правильный API endpoint...</b>")
+        await utils.answer(message, "🔍 <b>Получаю список моделей...</b>")
         
-        # Список возможных URL для проверки
-        possible_urls = [
-            "https://api.onlysq.ru/v1/chat/completions",
-            "https://my.onlysq.ru/v1/chat/completions",
-            "https://onlysq.ru/v1/chat/completions",
-            "https://api.onlysq.ru/chat/completions",
-            "https://my.onlysq.ru/api/v1/chat/completions",
-            "https://my.onlysq.ru/api/chat/completions",
-            "https://api.onlysq.ru/api/v1/chat/completions",
-        ]
-        
-        headers = {
-            "Authorization": f"Bearer {self.config['api_token']}",
-            "Content-Type": "application/json",
-        }
-        
-        payload = {
-            "model": self.config["model"],
-            "messages": [{"role": "user", "content": "test"}],
-            "max_tokens": 10
-        }
-        
-        results = []
-        
-        async with aiohttp.ClientSession() as session:
-            for url in possible_urls:
-                try:
-                    async with session.post(
-                        url,
-                        json=payload,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=10)
-                    ) as resp:
-                        status = resp.status
-                        results.append(f"✅ {url}\nСтатус: {status}")
-                        
-                        if status == 200:
-                            self.config["api_url"] = url
-                            await utils.answer(
-                                message,
-                                f"✅ <b>Найден рабочий endpoint!</b>\n\n"
-                                f"<code>{url}</code>\n\n"
-                                f"Сохранён в конфиг. Теперь можно использовать <code>.claude</code>"
-                            )
-                            return
-                        elif status not in [404, 405]:
-                            results.append(f"⚠️ Возможный вариант: {url} (статус {status})")
-                except Exception as e:
-                    results.append(f"❌ {url}\nОшибка: {str(e)[:50]}")
-        
-        result_text = "📊 <b>Результаты поиска:</b>\n\n" + "\n\n".join(results[:5])
-        result_text += "\n\n❌ <b>Рабочий endpoint не найден</b>\n\nПожалуйста, проверьте документацию OnlySQ или укажите URL вручную через <code>.config OnlySQ</code>"
-        await utils.answer(message, result_text)
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.config['api_token']}",
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://api.onlysq.ru/ai/models",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        await utils.answer(message, f"❌ <b>Ошибка {resp.status}:</b> <code>{error_text[:200]}</code>")
+                        return
+                    
+                    data = await resp.json()
+                    
+                    models_text = "📋 <b>Доступные модели:</b>\n\n"
+                    
+                    if isinstance(data, dict) and "data" in data:
+                        for model in data["data"]:
+                            model_id = model.get("id", "unknown")
+                            models_text += f"• <code>{model_id}</code>\n"
+                    else:
+                        models_text += f"<code>{json.dumps(data, indent=2)[:500]}</code>"
+                    
+                    models_text += f"\n\n<b>Текущая модель:</b> <code>{self.config['model']}</code>"
+                    models_text += f"\n\nЧтобы изменить: <code>.config OnlySQ</code>"
+                    
+                    await utils.answer(message, models_text)
+        except Exception as e:
+            await utils.answer(message, self.strings["error"].format(str(e)))
     
     @loader.command()
     async def claude(self, message):
@@ -175,7 +155,7 @@ class OnlySQMod(loader.Module):
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    raise Exception(f"API Error {resp.status}. Используйте .sqfind для поиска правильного URL")
+                    raise Exception(f"API Error {resp.status}: {error_text[:200]}")
                 
                 data = await resp.json()
                 
@@ -195,7 +175,7 @@ class OnlySQMod(loader.Module):
             f"🌐 <b>API URL:</b> <code>{self.config['api_url']}</code>\n\n"
             f"<b>Команды:</b>\n"
             f"• <code>.sqtoken [токен]</code> - установить токен\n"
-            f"• <code>.sqfind</code> - найти правильный API URL\n"
+            f"• <code>.sqmodels</code> - список доступных моделей\n"
             f"• <code>.claude [вопрос]</code> - спросить AI\n"
             f"• <code>.sqinfo</code> - информация\n\n"
             f"🌐 <b>Получить токен:</b> https://my.onlysq.ru/api-keys"
