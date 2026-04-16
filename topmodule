@@ -1,42 +1,225 @@
-from telethon import events
-from datetime import datetime, timedelta
-from heroku import cmd  # Предполагаемый декоратор команд в вашем форке
-from heroku.utils import admin_only
+# modules/topchat/core.py
 import asyncio
+import re
+import sqlite3
+import time
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple, Optional
 
-# Здесь должна быть логика подключения к вашей БД
-# Например, использование встроенных методов heroku-userbot для хранения данных
+from telethon import events, Button
+from telethon.tl.types import User
 
-@bot.on(events.NewMessage(incoming=True))
-async def count_messages(event):
-    if event.is_private:
-        return
-    # Логика инкремента сообщений пользователя в БД
-    # update_stats(event.chat_id, event.sender_id, datetime.now())
+from loader import Module, client, db  # импорт из ядра Heroku
 
-@cmd(pattern="top (день|неделя|все)")
-@admin_only
-async def get_top(event):
-    period = event.pattern_match.group(1)
-    chat_id = event.chat_id
-    
-    await event.edit(f"📊 Считаю топ за **{period}**...")
 
-    # Определение временных рамок
-    now = datetime.now()
-    if period == "день":
-        start_date = now - timedelta(days=1)
-    elif period == "неделя":
-        start_date = now - timedelta(weeks=1)
-    else:
-        start_date = None
+class TopChatModule(Module):
+    """Модуль для отображения топа чата за произвольный период."""
 
-    # Запрос к БД (псевдокод)
-    # top_list = await db.get_top_users(chat_id, start_date)
-    
-    # Пример вывода
-    res = f"🏆 **Топ активных за {period}:**\n\n"
-    # for i, user in enumerate(top_list, 1):
-    #    res += f"{i}. {user.name} — {user.count} сообщ.\n"
-    
-    await event.edit(res)
+    # Периоды для быстрых кнопок (секунды)
+    PRESETS = {
+        "1ч": 3600,
+        "6ч": 21600,
+        "12ч": 43200,
+        "1д": 86400,
+        "1н": 604800,
+        "1м": 2592000,
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.name = "TopChat"
+        self.description = "Показывает топ чата за период. Команда: .top <период>"
+        self.db_path = db.get_path("topchat.db")
+        self._init_db()
+        self._register_handlers()
+
+    def _init_db(self):
+        """Создаёт таблицу для хранения сообщений, если её нет."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    UNIQUE(chat_id, user_id, timestamp) ON CONFLICT IGNORE
+                )
+            """)
+            # Индексы для быстрых запросов
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_time ON messages(chat_id, timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_user_chat ON messages(user_id, chat_id)")
+
+    def _register_handlers(self):
+        """Регистрирует обработчики событий и команд."""
+
+        @client.on(events.NewMessage(incoming=True))
+        async def log_message(event):
+            """Записывает каждое новое сообщение в базу."""
+            if not event.is_private:
+                chat_id = event.chat_id
+                user_id = event.sender_id
+                ts = int(time.time())
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.execute(
+                        "INSERT INTO messages (chat_id, user_id, timestamp) VALUES (?, ?, ?)",
+                        (chat_id, user_id, ts),
+                    )
+
+        @client.on(events.NewMessage(pattern=r"^\.top(?:\s+(.+))?$"))
+        async def top_command(event):
+            """Обрабатывает команду .top [период]."""
+            period_str = event.pattern_match.group(1)
+            chat_id = event.chat_id
+
+            # Определяем временной интервал
+            if period_str:
+                seconds = self._parse_period(period_str)
+                if seconds is None:
+                    await event.reply("❌ Неверный формат периода.\nПримеры: `1h`, `30m`, `2d`, `1w`.")
+                    return
+            else:
+                # По умолчанию — 1 день
+                seconds = 86400
+
+            since_ts = int(time.time()) - seconds
+
+            # Получаем статистику
+            stats = await self._get_top_users(chat_id, since_ts, limit=600)
+
+            if not stats:
+                await event.reply(f"📭 Нет сообщений за указанный период.")
+                return
+
+            # Формируем ответ
+            period_text = self._format_period(seconds)
+            header = f"👑 **Топ чата за {period_text}:**\n\n"
+            lines = []
+            for i, (user_id, count) in enumerate(stats, 1):
+                # Пытаемся получить имя пользователя
+                user = await self._get_user_entity(user_id)
+                name = f"@{user.username}" if user and user.username else f"ID{user_id}"
+                lines.append(f"{i}. {name} — {count} сообщ.")
+
+            # Разбиваем на части, если слишком длинное сообщение
+            full_text = header + "\n".join(lines)
+            if len(full_text) > 4096:
+                # Отправляем файлом
+                await event.reply(
+                    file=await self._create_temp_file(full_text),
+                    message="📄 Топ слишком длинный, смотрите в файле.",
+                )
+            else:
+                # Добавляем кнопки быстрых периодов
+                buttons = self._create_preset_buttons()
+                await event.reply(full_text, buttons=buttons, parse_mode="markdown")
+
+    def _parse_period(self, s: str) -> Optional[int]:
+        """Преобразует строку типа '1h', '30m', '2d' в секунды."""
+        s = s.strip().lower()
+        match = re.match(r"^(\d+)\s*(с|сек|sec|s|м|мин|min|m|ч|час|h|hour|д|дн|day|d|н|нед|week|w|м|мес|month)$", s)
+        if not match:
+            return None
+        value = int(match.group(1))
+        unit = match.group(2)[0]
+        multipliers = {
+            "с": 1, "s": 1,
+            "м": 60, "m": 60,
+            "ч": 3600, "h": 3600,
+            "д": 86400, "d": 86400,
+            "н": 604800, "w": 604800,
+            "м": 2592000,  # месяц ~30 дней
+        }
+        return value * multipliers.get(unit, 0)
+
+    def _format_period(self, seconds: int) -> str:
+        """Красиво форматирует количество секунд для отображения."""
+        if seconds < 60:
+            return f"{seconds} сек"
+        elif seconds < 3600:
+            return f"{seconds // 60} мин"
+        elif seconds < 86400:
+            return f"{seconds // 3600} ч"
+        elif seconds < 604800:
+            return f"{seconds // 86400} дн"
+        elif seconds < 2592000:
+            return f"{seconds // 604800} нед"
+        else:
+            return f"{seconds // 2592000} мес"
+
+    async def _get_top_users(self, chat_id: int, since_ts: int, limit: int = 600) -> List[Tuple[int, int]]:
+        """Возвращает список (user_id, count) отсортированный по убыванию сообщений за период."""
+        def query():
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute("""
+                    SELECT user_id, COUNT(*) as cnt
+                    FROM messages
+                    WHERE chat_id = ? AND timestamp >= ?
+                    GROUP BY user_id
+                    ORDER BY cnt DESC
+                    LIMIT ?
+                """, (chat_id, since_ts, limit))
+                return cur.fetchall()
+
+        return await asyncio.get_event_loop().run_in_executor(None, query)
+
+    async def _get_user_entity(self, user_id: int):
+        """Получает сущность пользователя из кэша или через API."""
+        try:
+            return await client.get_entity(user_id)
+        except:
+            return None
+
+    def _create_preset_buttons(self):
+        """Создаёт кнопки для быстрого выбора периода."""
+        buttons = []
+        row = []
+        for label, sec in self.PRESETS.items():
+            row.append(Button.inline(label, f"top:{sec}"))
+            if len(row) == 3:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        return buttons
+
+    async def _create_temp_file(self, content: str):
+        """Создаёт временный файл для отправки длинного сообщения."""
+        import tempfile
+        f = tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False, encoding="utf-8")
+        f.write(content)
+        f.close()
+        return f.name
+
+    # Обработчик inline‑кнопок
+    async def on_inline_callback(self, event):
+        """Обрабатывает нажатия на кнопки быстрых периодов."""
+        data = event.data.decode()
+        if data.startswith("top:"):
+            seconds = int(data.split(":")[1])
+            chat_id = event.chat_id
+            since_ts = int(time.time()) - seconds
+
+            stats = await self._get_top_users(chat_id, since_ts, limit=600)
+            if not stats:
+                await event.edit("📭 Нет сообщений за выбранный период.")
+                return
+
+            period_text = self._format_period(seconds)
+            header = f"👑 **Топ чата за {period_text}:**\n\n"
+            lines = []
+            for i, (user_id, count) in enumerate(stats, 1):
+                user = await self._get_user_entity(user_id)
+                name = f"@{user.username}" if user and user.username else f"ID{user_id}"
+                lines.append(f"{i}. {name} — {count} сообщ.")
+
+            full_text = header + "\n".join(lines)
+            if len(full_text) > 4096:
+                await event.edit("📄 Слишком длинный список, используйте команду `.top` для получения файлом.")
+                return
+
+            buttons = self._create_preset_buttons()
+            await event.edit(full_text, buttons=buttons, parse_mode="markdown")
+
+
+# Регистрация модуля
+module = TopChatModule()
