@@ -108,11 +108,22 @@ class KilkaEmojiMod(loader.Module):
                 await conv.send_message("/newemojipack")
                 resp = await conv.get_response()
 
-                if resp.buttons:
-                    # Ищем кнопку "Static emoji" или кликаем первую
-                    await resp.click(text="Static emoji", exact=False)
-                    if not any("Static" in b.text for row in resp.buttons for b in row):
+if resp.buttons:
+                    clicked = False
+                    # Вручную ищем кнопку, в тексте которой есть "Static"
+                    for i, row in enumerate(resp.buttons):
+                        for j, button in enumerate(row):
+                            if "Static" in button.text:
+                                await resp.click(i, j)
+                                clicked = True
+                                break
+                        if clicked:
+                            break
+                    
+                    # Если вдруг кнопка не нашлась, кликаем самую первую
+                    if not clicked:
                         await resp.click(0)
+                        
                     resp = await conv.get_response()
 
                 # Отправляем название пака
