@@ -1,84 +1,110 @@
-# target: @Kilka_Young
 # meta developer: @Kilka_Young
-# scope: gemini_onlysq
+# scope: hikka_only
+# scope: hikka_min 1.2.10
 
 import aiohttp
+from telethon.tl.types import Message
 from .. import loader, utils
 
 @loader.tds
-class OnlySQGeminiMod(loader.Module):
-    """Модуль для работы с Gemini-3.1-pro через сервис OnlySQ"""
+class GeminiAIMod(loader.Module):
+    """Модуль для работы с Gemini AI через OnlySQ API"""
     
     strings = {
-        "name": "OnlySQGemini",
-        "no_token": "<b>❌ Токен не установлен!</b>\nПолучи его на <a href='https://my.onlysq.ru/api-keys'>OnlySQ</a> и установи командой <code>.setgemini [токен]</code>",
-        "set_token": "<b>✅ Токен успешно сохранен!</b>",
-        "no_args": "<b>❌ Введи текст запроса или ответь на сообщение!</b>",
-        "loading": "<b>🤔 Gemini думает...</b>",
-        "error": "<b>❌ Ошибка API:</b> <code>{}</code>"
+        "name": "GeminiAI",
+        "no_token": "❌ <b>Токен не установлен!</b>\n\n"
+                   "Получите токен на https://my.onlysq.ru/api-keys\n"
+                   "Установите командой: <code>.config GeminiAI</code>",
+        "no_question": "❌ <b>Укажите вопрос!</b>\n"
+                      "Использование: <code>.gemini [вопрос]</code>",
+        "processing": "🤔 <b>Думаю...</b>",
+        "error": "❌ <b>Ошибка:</b> <code>{}</code>",
+        "response": "💎 <b>Gemini AI:</b>\n\n{}",
+        "token_set": "✅ <b>Токен успешно установлен!</b>",
     }
 
+    def __init__(self):
+        self.config = loader.ModuleConfig(
+            loader.ConfigValue(
+                "api_token",
+                None,
+                lambda: "API токен с https://my.onlysq.ru/api-keys",
+                validator=loader.validators.Hidden()
+            ),
+            loader.ConfigValue(
+                "model",
+                "gemini-3.1-pro",
+                lambda: "Модель для использования",
+            ),
+        )
+
     async def client_ready(self, client, db):
+        self.client = client
         self.db = db
 
     @loader.command()
-    async def setgemini(self, message):
-        """Установить API токен OnlySQ: .setgemini [token]"""
+    async def gemini(self, message: Message):
+        """<вопрос> - Спросить у Gemini AI"""
+        
         args = utils.get_args_raw(message)
+        
         if not args:
-            return await utils.answer(message, self.strings("no_token"))
+            await utils.answer(message, self.strings["no_question"])
+            return
         
-        self.db.set("OnlySQGemini", "token", args)
-        await utils.answer(message, self.strings("set_token"))
-
-    @loader.command()
-    async def gemini(self, message):
-        """Задать вопрос Gemini: .gemini [текст]"""
-        token = self.db.get("OnlySQGemini", "token")
-        if not token:
-            return await utils.answer(message, self.strings("no_token"))
-
-        args = utils.get_args_raw(message)
-        reply = await message.get_reply_message()
+        if not self.config["api_token"]:
+            await utils.answer(message, self.strings["no_token"])
+            return
         
-        prompt = args or (reply.text if reply else None)
+        await utils.answer(message, self.strings["processing"])
         
-        if not prompt:
-            return await utils.answer(message, self.strings("no_args"))
-
-        message = await utils.answer(message, self.strings("loading"))
-
-        url = "https://api.onlysq.ru/ai/gemini"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
-        
-        payload = {
-            "model": "gemini-3.1-pro",
-            "messages": [
-                {"role": "user", "content": prompt}
-            ]
-        }
-
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, headers=headers) as response:
-                    data = await response.json()
+                headers = {
+                    "Authorization": f"Bearer {self.config['api_token']}",
+                    "Content-Type": "application/json"
+                }
+                
+                payload = {
+                    "model": self.config["model"],
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": args
+                        }
+                    ]
+                }
+                
+                async with session.post(
+                    "https://api.onlysq.ru/ai/gemini",
+                    json=payload,
+                    headers=headers
+                ) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        await utils.answer(
+                            message, 
+                            self.strings["error"].format(f"HTTP {resp.status}: {error_text}")
+                        )
+                        return
                     
-                    if response.status == 200:
-                        # Обычно ответ лежит в data['answer'] или data['choices'][0]['message']['content']
-                        # Для OnlySQ часто структура упрощена:
-                        answer = data.get("answer") or data.get("response") or data.get("result")
-                        
-                        if not answer and "choices" in data:
-                            answer = data["choices"][0]["message"]["content"]
-                            
-                        await utils.answer(message, f"<b>♊ Gemini 3.1 Pro:</b>\n\n{answer}")
-                    else:
-                        error_msg = data.get("message") or data.get("error") or response.reason
-                        await utils.answer(message, self.strings("error").format(error_msg))
-        
+                    data = await resp.json()
+                    
+                    # Попытка извлечь ответ из разных возможных структур
+                    response_text = (
+                        data.get("choices", [{}])[0].get("message", {}).get("content") or
+                        data.get("response") or
+                        data.get("text") or
+                        str(data)
+                    )
+                    
+                    await utils.answer(
+                        message,
+                        self.strings["response"].format(response_text)
+                    )
+                    
         except Exception as e:
-            await utils.answer(message, self.strings("error").format(str(e)))
+            await utils.answer(
+                message,
+                self.strings["error"].format(str(e))
+            )
