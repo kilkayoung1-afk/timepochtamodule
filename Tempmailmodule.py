@@ -1,6 +1,6 @@
 # tempmail.py — Модуль временной почты для Hikka / Heroku Loader
-# Исправлено: добавлена принудительная проверка писем (.mailcheck)
-
+# Исправлено: ошибки NameError и логика ручной проверки
+#Developer: @Kilka_Young
 import asyncio
 import random
 import string
@@ -20,6 +20,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# ─── Константы ────────────────────────────────────────────────────────────────
 API_BASE      = "https://www.1secmail.com/api/v1/"
 MAIL_LIFETIME = 600
 CHECK_INTERVAL = 8
@@ -49,135 +50,135 @@ class MailSession:
         s = self.remaining
         return f"{s // 60:02d}:{s % 60:02d}"
 
-# ─── API Helpers ────────────────────────────────────────────────────────────
-
-async def _fetch_emails(http_session, sess: MailSession, client, chat_id):
-    """Логика получения и отправки писем (вынесена для вызова из разных команд)"""
-    letters = await _get_messages(http_session, sess.login, sess.domain)
-    found_new = False
-    for letter in letters:
-        lid = letter.get("id")
-        if lid and lid not in sess.seen_ids:
-            sess.seen_ids.add(lid)
-            full = await _read_message(http_session, sess.login, sess.domain, lid)
-            if full:
-                found_new = True
-                try:
-                    await client.send_message(chat_id, _format_letter(full))
-                except Exception as e:
-                    logger.warning(f"[TempMail] send error: {e}")
-    return found_new
-
-async def _get_messages(session, login, domain):
-    url = f"{API_BASE}?action=getMessages&login={login}&domain={domain}"
-    try:
-        async with session.get(url, timeout=10) as r:
-            return await r.json() if r.status == 200 else []
-    except: return []
-
-async def _read_message(session, login, domain, msg_id):
-    url = f"{API_BASE}?action=readMessage&login={login}&domain={domain}&id={msg_id}"
-    try:
-        async with session.get(url, timeout=10) as r:
-            return await r.json() if r.status == 200 else None
-    except: return None
-
-def _format_mail_status(sess: MailSession) -> str:
-    return (
-        "📧 <b>Ваша почта:</b> <code>{0}</code>\n"
-        "⏳ <b>Истекает через:</b> {1}\n\n"
-        "🔄 <i>Для ручной проверки:</i> <code>.mailcheck</code>"
-    ).format(sess.email, sess.fmt_remaining())
-
-def _format_letter(msg: dict) -> str:
-    sender = msg.get("from", "—")
-    subject = msg.get("subject", "(без темы)")
-    body = re.sub(r"<[^>]+>", "", (msg.get("body") or "")).strip()
-    return f"📨 <b>Новое письмо!</b>\n" \
-           f"👤 <b>От:</b> {sender}\n" \
-           f"📌 <b>Тема:</b> {subject}\n\n" \
-           f"{body[:1200]}"
-
 # ─────────────────────────────────────────────────────────────────────────────
 
-if HIKKA:
-    @loader.tds
-    class TempMailMod(loader.Module):
-        """Временная почта с ручным обновлением"""
-        strings = {"name": "TempMail"}
+@loader.tds
+class TempMailMod(loader.Module):
+    """Временная почта с ручным обновлением (.mailcheck)"""
+    strings = {"name": "TempMail"}
 
-        def __init__(self):
-            self._sessions: dict[int, MailSession] = {}
-            self._http: aiohttp.ClientSession | None = None
+    def __init__(self):
+        self._sessions: dict[int, MailSession] = {}
+        self._http: aiohttp.ClientSession | None = None
 
-        async def client_ready(self, client, db):
-            self._client = client
-            self._http = aiohttp.ClientSession()
+    async def client_ready(self, client, db):
+        self._client = client
+        self._http = aiohttp.ClientSession()
 
-        @loader.command()
-        async def mailcmd(self, message: Message):
-            """.mail — создать временный email"""
-            uid = message.sender_id
-            if uid in self._sessions and self._sessions[uid].is_alive:
-                return await utils.answer(message, f"✅ Активна: <code>{self._sessions[uid].email}</code>")
-            await self._create_mail(message, uid)
+    # ── Команды ─────────────────────────────────────────────────────────────
 
-        @loader.command()
-        async def mailcheckcmd(self, message: Message):
-            """.mailcheck — проверить почту вручную"""
-            uid = message.sender_id
-            if uid not in self._sessions or not self._sessions[uid].is_alive:
-                return await utils.answer(message, "❌ Нет активной почты. Создайте её через .mail")
-            
+    @loader.command()
+    async def mailcmd(self, message: Message):
+        """.mail — создать временный email"""
+        uid = message.sender_id
+        if uid in self._sessions and self._sessions[uid].is_alive:
+            return await utils.answer(message, f"✅ Активна: <code>{self._sessions[uid].email}</code>")
+        await self._create_mail(message, uid)
+
+    @loader.command()
+    async def mailcheckcmd(self, message: Message):
+        """.mailcheck — проверить почту вручную"""
+        uid = message.sender_id
+        if uid not in self._sessions or not self._sessions[uid].is_alive:
+            return await utils.answer(message, "❌ Нет активной почты. Используйте .mail")
+        
+        sess = self._sessions[uid]
+        await utils.answer(message, "🔍 Проверяю входящие...")
+        
+        new_msgs = await self._fetch_emails(sess, message.chat_id)
+        if not new_msgs:
+            await asyncio.sleep(1)
+            await utils.answer(message, "📭 Новых писем пока нет.")
+
+    @loader.command()
+    async def mailnewcmd(self, message: Message):
+        """.mailnew — удалить текущую и создать новую почту"""
+        await self._stop_session(message.sender_id)
+        await self._create_mail(message, message.sender_id)
+
+    @loader.command()
+    async def mailoffcmd(self, message: Message):
+        """.mailoff — остановить сессию почты"""
+        uid = message.sender_id
+        if uid in self._sessions:
+            email = self._sessions[uid].email
+            await self._stop_session(uid)
+            await utils.answer(message, f"🗑 Почта <code>{email}</code> удалена.")
+        else:
+            await utils.answer(message, "❌ Нет активных сессий.")
+
+    # ── Внутренняя логика ──────────────────────────────────────────────────
+
+    async def _create_mail(self, message, uid):
+        login = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+        domain = random.choice(DOMAINS)
+        sess = MailSession(login, domain)
+        
+        status_text = (
+            f"📧 <b>Ваша почта:</b> <code>{sess.email}</code>\n"
+            f"⏳ <b>Истекает через:</b> {sess.fmt_remaining()}\n\n"
+            f"🔄 <i>Для проверки:</i> <code>.mailcheck</code>"
+        )
+        
+        msg = await utils.answer(message, status_text)
+        sess.msg_id = msg[0].id if isinstance(msg, (list, tuple)) else msg.id
+        self._sessions[uid] = sess
+        sess.task = asyncio.create_task(self._worker(uid, message.chat_id))
+
+    async def _fetch_emails(self, sess: MailSession, chat_id):
+        if not self._http: return False
+        
+        url = f"{API_BASE}?action=getMessages&login={sess.login}&domain={sess.domain}"
+        found_new = False
+        try:
+            async with self._http.get(url, timeout=10) as r:
+                if r.status == 200:
+                    letters = await r.json()
+                    for letter in letters:
+                        lid = letter.get("id")
+                        if lid and lid not in sess.seen_ids:
+                            sess.seen_ids.add(lid)
+                            # Читаем полное письмо
+                            read_url = f"{API_BASE}?action=readMessage&login={sess.login}&domain={sess.domain}&id={lid}"
+                            async with self._http.get(read_url, timeout=10) as rr:
+                                if rr.status == 200:
+                                    full = await rr.json()
+                                    found_new = True
+                                    await self._client.send_message(chat_id, self._format_letter(full))
+        except Exception as e:
+            logger.warning(f"[TempMail] Fetch error: {e}")
+        return found_new
+
+    def _format_letter(self, msg: dict) -> str:
+        sender = msg.get("from", "—")
+        subject = msg.get("subject", "(без темы)")
+        body = re.sub(r"<[^>]+>", "", (msg.get("body") or "")).strip()
+        return (
+            f"📨 <b>Новое письмо!</b>\n"
+            f"─────────────────\n"
+            f"👤 <b>От:</b> {sender}\n"
+            f"📌 <b>Тема:</b> {subject}\n\n"
+            f"{body[:1200]}"
+        )
+
+    async def _stop_session(self, uid):
+        if uid in self._sessions:
+            sess = self._sessions.pop(uid)
+            if sess.task: sess.task.cancel()
+
+    async def _worker(self, uid, chat_id):
+        while uid in self._sessions:
             sess = self._sessions[uid]
-            await utils.answer(message, "🔍 Проверяю входящие...")
-            
-            new_msgs = await _fetch_emails(self._http, sess, self._client, message.chat_id)
-            
-            if not new_msgs:
-                await asyncio.sleep(1)
-                await utils.answer(message, "📭 Новых писем пока нет.")
-
-        @loader.command()
-        async def mailnewcmd(self, message: Message):
-            """.mailnew — новая почта"""
-            await self._stop_session(message.sender_id)
-            await self._create_mail(message, message.sender_id)
-
-        @loader.command()
-        async def mailoffcmd(self, message: Message):
-            """.mailoff — удалить почту"""
-            uid = message.sender_id
-            if uid in self._sessions:
-                await self._stop_session(uid)
-                await utils.answer(message, "🗑 Почта удалена.")
-            else:
-                await utils.answer(message, "❌ Нет активных сессий.")
-
-        async def _create_mail(self, message, uid):
-            sess = MailSession(_random_login(), random.choice(DOMAINS))
-            msg = await utils.answer(message, _format_mail_status(sess))
-            sess.msg_id = msg[0].id if isinstance(msg, (list, tuple)) else msg.id
-            self._sessions[uid] = sess
-            sess.task = asyncio.create_task(self._worker(uid, message.chat_id))
-
-        async def _stop_session(self, uid):
-            if uid in self._sessions:
-                sess = self._sessions.pop(uid)
-                if sess.task: sess.task.cancel()
-
-        async def _worker(self, uid, chat_id):
-            sess = self._sessions.get(uid)
-            while sess and sess.is_alive:
-                try:
-                    await self._client.edit_message(chat_id, sess.msg_id, _format_mail_status(sess))
-                    await _fetch_emails(self._http, sess, self._client, chat_id)
-                except: pass
-                await asyncio.sleep(CHECK_INTERVAL)
-            self._sessions.pop(uid, None)
-
-else:
-    # Упрощенная регистрация для Heroku Loader вне Hikka
-    def register(client):
-        # ... (код для Heroku аналогичен, просто вешается на события TelegramClient)
-        pass
+            if not sess.is_alive: break
+            try:
+                # Обновляем статус (таймер)
+                status_text = (
+                    f"📧 <b>Ваша почта:</b> <code>{sess.email}</code>\n"
+                    f"⏳ <b>Истекает через:</b> {sess.fmt_remaining()}\n\n"
+                    f"🔄 <i>Для проверки:</i> <code>.mailcheck</code>"
+                )
+                await self._client.edit_message(chat_id, sess.msg_id, status_text)
+                await self._fetch_emails(sess, chat_id)
+            except: pass
+            await asyncio.sleep(CHECK_INTERVAL)
+        self._sessions.pop(uid, None)
