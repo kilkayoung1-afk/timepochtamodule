@@ -1,224 +1,144 @@
 import asyncio
-import logging
-import os
-import aiosqlite
+import time
 import aiohttp
-from datetime import datetime
-from dotenv import load_dotenv
+from typing import Dict, Optional, Any
 
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.storage.memory import MemoryStorage
+class SMSServiceError(Exception):
+"""Кастомное исключение для ошибок API сервиса SMS."""
+pass
 
-# --- CONFIG ---
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-SMS_API_KEY = os.getenv("SMS_API_KEY")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-DB_PATH = "sms_service.db"
-SMS_ACTIVATE_URL = "https://api.sms-activate.org/stubs/handler_api.php"
-
-# --- DATABASE ---
-class Database:
-    def __init__(self, path):
-        self.path = path
-
-    async def setup(self):
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    balance REAL DEFAULT 0.0,
-                    username TEXT
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS orders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    activation_id TEXT,
-                    phone TEXT,
-                    service TEXT,
-                    status TEXT,
-                    code TEXT
-                )
-            """)
-            await db.commit()
-
-    async def get_user(self, user_id):
-        async with aiosqlite.connect(self.path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
-                return await cursor.fetchone()
-
-    async def add_user(self, user_id, username):
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
-            await db.commit()
-
-    async def update_balance(self, user_id, amount):
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
-            await db.commit()
-
-db_manager = Database(DB_PATH)
-
-# --- SMS API SERVICE ---
 class SMSService:
-    def __init__(self, api_key):
-        self.api_key = api_key
+"""
+Класс для работы с API sms-activate.org
+Позволяет получать номера, проверять статус и ожидать SMS.
+"""
 
-    async def _request(self, params):
-        params["api_key"] = self.api_key
+def __init__(self, api_key: str):
+    """
+    Инициализация сервиса.
+    :param api_key: API ключ от сервиса (например, sms-activate).
+    """
+    self.api_key = api_key
+    self.base_url = "[https://api.sms-activate.org/stubs/handler_api.php](https://api.sms-activate.org/stubs/handler_api.php)"
+
+async def _request(self, action: str, **kwargs) -> str:
+    """
+    Внутренний метод для выполнения запросов к API.
+    """
+    params = {
+        "api_key": self.api_key,
+        "action": action
+    }
+    params.update(kwargs)
+    
+    try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(SMS_ACTIVATE_URL, params=params) as resp:
-                return await resp.text()
+            async with session.get(self.base_url, params=params) as response:
+                if response.status != 200:
+                    raise SMSServiceError(f"HTTP ошибка: {response.status}")
+                text = await response.text()
+                return text.strip()
+    except aiohttp.ClientError as e:
+        raise SMSServiceError(f"Сетевая ошибка при запросе к API: {e}")
 
-    async def get_number(self, service, country=0):
-        res = await self._request({"action": "getNumber", "service": service, "country": country})
-        if "ACCESS_NUMBER" in res:
-            _, act_id, phone = res.split(":")
-            return {"id": act_id, "phone": phone}
-        return None
-
-    async def get_status(self, act_id):
-        res = await self._request({"action": "getStatus", "id": act_id})
-        return res
-
-    async def set_status(self, act_id, status):
-        # 1 - сообщить об отправке, 8 - отмена
-        await self._request({"action": "setStatus", "id": act_id, "status": status})
-
-sms_api = SMSService(SMS_API_KEY)
-
-# --- HANDLERS ---
-router = Router()
-
-def get_main_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Купить номер", callback_data="buy_list")],
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"), InlineKeyboardButton(text="💳 Пополнить", callback_data="deposit")]
-    ])
-
-@router.message(Command("start"))
-async def cmd_start(message: Message):
-    await db_manager.add_user(message.from_user.id, message.from_user.username)
-    await message.answer(
-        f"🤖 *Добро пожаловать в SMS Service!*\n\nПолучайте коды верификации для любых соцсетей быстро и надежно.",
-        reply_markup=get_main_kb(),
-        parse_mode="Markdown"
-    )
-
-@router.callback_query(F.data == "profile")
-async def view_profile(call: CallbackQuery):
-    user = await db_manager.get_user(call.from_user.id)
-    text = (f"👤 *Ваш профиль*\n\n"
-            f"🆔 ID: `{call.from_user.id}`\n"
-            f"💰 Баланс: `{user['balance']}` руб.\n"
-            f"📞 Заказов: (в разработке)")
-    await call.message.edit_text(text, reply_markup=get_main_kb(), parse_mode="Markdown")
-
-@router.callback_query(F.data == "buy_list")
-async def buy_list(call: CallbackQuery):
-    # Упрощенный список сервисов
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Telegram (tg) - 30₽", callback_data="buy_tg")],
-        [InlineKeyboardButton(text="WhatsApp (wa) - 20₽", callback_data="buy_wa")],
-        [InlineKeyboardButton(text="ВКонтакте (vk) - 15₽", callback_data="buy_vk")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
-    ])
-    await call.message.edit_text("Выбери сервис для получения SMS:", reply_markup=kb)
-
-@router.callback_query(F.data.startswith("buy_"))
-async def process_buy(call: CallbackQuery):
-    service_code = call.data.split("_")[1]
-    user = await db_manager.get_user(call.from_user.id)
+async def get_number(self, service: str, country: str = "0") -> Dict[str, str]:
+    """
+    Получает номер для указанного сервиса и страны.
+    :param service: Код сервиса (например 'vk', 'tg').
+    :param country: Код страны (по умолчанию '0' - Россия).
+    :return: Словарь с id заказа и номером телефона.
+    """
+    response = await self._request("getNumber", service=service, country=country)
     
-    price = 30 # В идеале получать цены через getPrices API
-    if user['balance'] < price:
-        return await call.answer("❌ Недостаточно средств на балансе!", show_alert=True)
+    if response.startswith("ACCESS_NUMBER"):
+        parts = response.split(":")
+        if len(parts) >= 3:
+            return {
+                "id": parts[1],
+                "number": parts[2]
+            }
+    raise SMSServiceError(f"Не удалось получить номер. Ответ API: {response}")
 
-    await call.answer("⏳ Запрашиваю номер...")
-    num_data = await sms_api.get_number(service_code)
+async def get_status(self, order_id: str) -> Dict[str, Optional[str]]:
+    """
+    Проверяет статус конкретного заказа.
+    :param order_id: ID заказа.
+    :return: Словарь со статусом и кодом SMS (если есть).
+    """
+    response = await self._request("getStatus", id=order_id)
     
-    if not num_data:
-        return await call.message.answer("❌ Свободных номеров нет, попробуйте позже.")
+    if response == "STATUS_WAIT_CODE":
+        return {"status": "WAITING", "sms": None}
+    elif response.startswith("STATUS_OK"):
+        parts = response.split(":")
+        return {"status": "RECEIVED", "sms": parts[1] if len(parts) > 1 else None}
+    elif response == "STATUS_CANCEL":
+        return {"status": "CANCELLED", "sms": None}
+    else:
+        raise SMSServiceError(f"Неизвестный статус. Ответ API: {response}")
 
-    act_id = num_data['id']
-    phone = num_data['phone']
+async def wait_for_sms(self, order_id: str, timeout: int = 120) -> Dict[str, Optional[str]]:
+    """
+    Ожидает получение SMS (polling) с заданным таймаутом.
+    :param order_id: ID заказа.
+    :param timeout: Время ожидания в секундах.
+    :return: Словарь со статусом 'RECEIVED' и полученным кодом.
+    """
+    start_time = time.time()
     
-    # Списываем баланс (упрощенно)
-    await db_manager.update_balance(call.from_user.id, -price)
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_{act_id}")]
-    ])
-    
-    msg = await call.message.answer(
-        f"✅ Номер получен!\n\n📞 `{phone}`\nСервис: {service_code}\n\n*Ожидание SMS...*",
-        reply_markup=kb, parse_mode="Markdown"
-    )
-
-    # Запуск цикла проверки
-    asyncio.create_task(wait_for_sms(msg, act_id, call.from_user.id, price))
-
-async def wait_for_sms(msg: Message, act_id, user_id, price):
-    for _ in range(60): # 10 минут ожидания (каждые 10 сек)
-        await asyncio.sleep(10)
-        status = await sms_api.get_status(act_id)
+    while time.time() - start_time < timeout:
+        result = await self.get_status(order_id)
         
-        if "STATUS_OK" in status:
-            code = status.split(":")[1]
-            await msg.edit_text(f"📩 *Код получен:* `{code}`\nНомер: `{act_id}`", parse_mode="Markdown")
-            return
+        if result["status"] == "RECEIVED":
+            return result
+        elif result["status"] == "CANCELLED":
+            raise SMSServiceError("Заказ был отменен во время ожидания SMS.")
         
-        if "STATUS_CANCEL" in status:
-            await msg.edit_text("❌ Заказ отменен. Средства возвращены.")
-            await db_manager.update_balance(user_id, price)
-            return
+        await asyncio.sleep(5)  # Пауза между запросами (polling)
+        
+    raise SMSServiceError(f"Таймаут {timeout}с. истек при ожидании SMS.")
 
-    # Если время вышло
-    await sms_api.set_status(act_id, 8)
-    await msg.edit_text("⌛️ Время ожидания истекло. Номер отменен.")
-    await db_manager.update_balance(user_id, price)
-
-@router.callback_query(F.data.startswith("cancel_"))
-async def cancel_order(call: CallbackQuery):
-    act_id = call.data.split("_")[1]
-    await sms_api.set_status(act_id, 8)
-    await call.answer("Запрос на отмену отправлен")
-
-# --- ADMIN HANDLERS ---
-@router.message(Command("admin"))
-async def admin_panel(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    await message.answer("👑 Админ-панель\n\nДля пополнения используй:\n`/give ID сумма`")
-
-@router.message(Command("give"))
-async def give_money(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        _, user_id, amount = message.text.split()
-        await db_manager.update_balance(int(user_id), float(amount))
-        await message.answer(f"✅ Баланс пользователя `{user_id}` пополнен на {amount} руб.", parse_mode="Markdown")
-    except:
-        await message.answer("Ошибка. Формат: `/give 1234567 100`")
-
-# --- MAIN ---
+async def cancel_number(self, order_id: str) -> bool:
+    """
+    Отменяет заказ.
+    :param order_id: ID заказа.
+    :return: True если успешно, иначе False.
+    """
+    response = await self._request("setStatus", id=order_id, status="8")
+    if response == "ACCESS_CANCEL":
+        return True
+    return False
+if name == "main":
 async def main():
-    logging.basicConfig(level=logging.INFO)
-    await db_manager.setup()
-    
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.include_router(router)
-    
-    print("Бот запущен и готов к работе!")
-    await dp.start_polling(bot)
+# Пример использования (замените 'YOUR_API_KEY_HERE' на реальный ключ)
+API_KEY = "YOUR_API_KEY_HERE"
+SERVICE_CODE = "tg" # Telegram
+COUNTRY_CODE = "0"  # Россия
 
-if __name__ == "__main__":
+    sms_service = SMSService(api_key=API_KEY)
+    order_id = None
+    
     try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+        print("1. Запрашиваем номер...")
+        number_info = await sms_service.get_number(service=SERVICE_CODE, country=COUNTRY_CODE)
+        order_id = number_info["id"]
+        phone = number_info["number"]
+        print(f"[+] Номер получен: {phone} (ID: {order_id})")
+        
+        print(f"2. Ожидаем SMS (до 120 секунд)...")
+        sms_data = await sms_service.wait_for_sms(order_id=order_id, timeout=120)
+        print(f"[+] SMS успешно получено! Код: {sms_data['sms']}")
+        
+    except SMSServiceError as e:
+        print(f"[-] Ошибка сервиса SMS: {e}")
+    except Exception as e:
+        print(f"[-] Непредвиденная ошибка: {e}")
+    finally:
+        if order_id:
+            print("3. Завершение работы/Отмена заказа...")
+            # При необходимости отменяем или завершаем статус
+            # await sms_service.cancel_number(order_id)
+            print("[*] Готово.")
+
+# Запуск асинхронного примера
+asyncio.run(main())
