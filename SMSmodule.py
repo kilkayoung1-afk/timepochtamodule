@@ -7,7 +7,7 @@
 #                                          
 #        Hikka SMS Receiver Module         
 #        Author: @Kilka_Young              
-#        API: 5sim.net                     
+#        API: Hero-SMS.com                 
 
 import aiohttp
 import asyncio
@@ -15,100 +15,84 @@ import time
 from .. import loader, utils
 
 # === НАСТРОЙКИ ===
-API_KEY = "YOUR_API_KEY"
-SERVICE = "telegram"
-COUNTRY = "russia"
-BASE_URL = "https://api5sim.net/v1/user"
+API_KEY = "1b45Ac5f32776e26412b85c980c467fc"
+SERVICE = "tg"  # telegram
+COUNTRY = "ru"  # russia
+BASE_URL = "https://api.hero-sms.com/stubs/handler_api.php"
 
 @loader.tds
-class SMSReceiverMod(loader.Module):
-    """Модуль для получения временных номеров через 5sim"""
+class HeroSMSMod(loader.Module):
+    """Модуль для получения номеров через Hero-SMS"""
     strings = {
-        "name": "SMSReceiver",
-        "no_key": "❌ <b>API ключ не установлен в коде!</b>",
-        "no_money": "❌ <b>Недостаточно средств на балансе.</b>",
-        "no_number": "❌ <b>Нет доступных номеров для этого сервиса/страны.</b>",
+        "name": "HeroSMS",
+        "no_money": "❌ <b>Недостаточно средств на Hero-SMS.</b>",
+        "no_number": "❌ <b>Нет свободных номеров.</b>",
         "active_exists": "⚠️ <b>У вас уже есть активный номер:</b> <code>{}</code>",
-        "no_active": "❌ <b>У вас нет активного номера.</b>",
-        "num_info": "📱 <b>Номер:</b> <code>{}</code>\n🕒 <b>ID:</b> <code>{}</code>\n⌛️ <b>Истекает через:</b> 15 мин.\n\n<i>Используйте .sms для проверки кода</i>",
-        "sms_wait": "⏳ <b>SMS еще не пришло. Попробуйте позже или .refresh</b>",
-        "sms_res": "📩 <b>Ваш код:</b> <code>{}</code>\n📝 <b>Текст:</b> <code>{}</code>",
+        "no_active": "❌ <b>Нет активных заказов.</b>",
+        "num_info": "📱 <b>Номер:</b> <code>{}</code>\n🆔 <b>ID:</b> <code>{}</code>\n⌛️ <b>Статус:</b> Ожидание SMS\n\n<i>Используйте .sms для проверки</i>",
+        "sms_wait": "⏳ <b>SMS еще не пришло.</b>",
+        "sms_res": "📩 <b>Код:</b> <code>{}</code>",
         "canceled": "🗑 <b>Заказ #{} отменен.</b>",
-        "error": "❗ <b>Ошибка API:</b> <code>{}</code>"
+        "error": "❗ <b>Ошибка:</b> <code>{}</code>"
     }
 
-    async def client_get(self, path):
-        headers = {
-            "Authorization": f"Bearer {API_KEY}",
-            "Accept": "application/json"
-        }
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(f"{BASE_URL}{path}") as resp:
-                if resp.status == 401:
-                    return "no_key"
-                return await resp.json()
+    async def api_call(self, action, params=None):
+        p = {"api_key": API_KEY, "action": action}
+        if params: p.update(params)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(BASE_URL, params=p) as resp:
+                return await resp.text()
 
     async def numbercmd(self, message):
-        """Получить временный номер"""
-        if API_KEY == "YOUR_API_KEY":
-            return await utils.answer(message, self.strings("no_key"))
-
+        """Получить номер"""
         uid = str(message.sender_id)
-        active = self.get(uid, None)
+        if self.get(uid):
+            return await utils.answer(message, self.strings("active_exists").format(self.get(uid)['phone']))
+
+        res = await self.api_call("getNumber", {"service": SERVICE, "country": COUNTRY})
         
-        if active:
-            # Проверка на просрочку (15 минут)
-            if time.time() - active['time'] < 900:
-                return await utils.answer(message, self.strings("active_exists").format(active['phone']))
-            else:
-                self.set(uid, None)
-
-        data = await self.client_get(f"/buy/activation/{COUNTRY}/{SERVICE}")
-        
-        if isinstance(data, str): return await utils.answer(message, self.strings(data))
-        if "id" not in data:
-            if "no free" in str(data).lower():
-                return await utils.answer(message, self.strings("no_number"))
-            return await utils.answer(message, self.strings("error").format(data))
-
-        self.set(uid, {
-            "id": data["id"],
-            "phone": data["phone"],
-            "time": time.time()
-        })
-
-        await utils.answer(message, self.strings("num_info").format(data["phone"], data["id"]))
+        if "ACCESS_NUMBER" in res:
+            _, aid, phone = res.split(":")
+            self.set(uid, {"id": aid, "phone": phone, "time": time.time()})
+            await utils.answer(message, self.strings("num_info").format(phone, aid))
+        elif "NO_NUMBERS" in res:
+            await utils.answer(message, self.strings("no_number"))
+        elif "NO_BALANCE" in res:
+            await utils.answer(message, self.strings("no_money"))
+        else:
+            await utils.answer(message, self.strings("error").format(res))
 
     async def smscmd(self, message):
-        """Посмотреть SMS"""
+        """Проверить SMS"""
         uid = str(message.sender_id)
-        active = self.get(uid, None)
+        active = self.get(uid)
         if not active:
             return await utils.answer(message, self.strings("no_active"))
 
-        data = await self.client_get(f"/check/{active['id']}")
-        
-        if "sms" in data and data["sms"]:
-            sms_data = data["sms"][-1]
-            await utils.answer(message, self.strings("sms_res").format(sms_data["code"], sms_data["text"]))
-        else:
+        res = await self.api_call("getStatus", {"id": active["id"]})
+
+        if "STATUS_OK" in res:
+            code = res.split(":")[1]
+            await utils.answer(message, self.strings("sms_res").format(code))
+        elif "STATUS_WAIT_CODE" in res:
             await utils.answer(message, self.strings("sms_wait"))
+        elif "STATUS_CANCEL" in res:
+            self.set(uid, None)
+            await utils.answer(message, "❌ Номер отменен сервисом.")
+        else:
+            await utils.answer(message, self.strings("error").format(res))
 
     async def refreshcmd(self, message):
-        """Обновить статус SMS"""
+        """Обновить статус"""
         await self.smscmd(message)
 
     async def cancelcmd(self, message):
-        """Отменить текущий номер"""
+        """Отменить номер"""
         uid = str(message.sender_id)
-        active = self.get(uid, None)
+        active = self.get(uid)
         if not active:
             return await utils.answer(message, self.strings("no_active"))
 
-        data = await self.client_get(f"/cancel/{active['id']}")
+        await self.api_call("setStatus", {"id": active["id"], "status": 8})
         self.set(uid, None)
         await utils.answer(message, self.strings("canceled").format(active['id']))
-
-    async def on_unload(self):
-        # Очистка не требуется, так как используется встроенный db
-        pass
