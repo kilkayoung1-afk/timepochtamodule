@@ -5,7 +5,7 @@
 #             | | | | | | (_| | (_| |      
 #             \_| |_/_|_|\__,_|\__,_|      
 #                                          
-#        Hikka SMS Receiver Module (Anti-Block)
+#        Hikka SMS Receiver Module (Direct IP)
 #        Author: @Kilka_Young              
 #        API: Hero-SMS.com                 
 
@@ -18,43 +18,46 @@ from .. import loader, utils
 API_KEY = "1b45Ac5f32776e26412b85c980c467fc"
 SERVICE = "tg"
 COUNTRY = "ru"
-BASE_URL = "https://api.hero-sms.com/stubs/handler_api.php"
 
-# Если без VPN не работает, вставь сюда адрес прокси (например "http://user:pass@ip:port")
-# Если оставить None, будет пытаться соединиться напрямую
-PROXY = None 
+# Прямой IP сервера (обход DNS блокировок)
+# Если IP изменится, модуль может перестать работать
+DIRECT_IP = "194.58.103.226" 
+HOST_HEADER = "api.hero-sms.com"
+BASE_URL = f"http://{DIRECT_IP}/stubs/handler_api.php"
 
 @loader.tds
 class HeroSMSMod(loader.Module):
-    """Модуль для получения номеров через Hero-SMS (с обходом блокировок)"""
+    """Модуль SMS через прямой IP (без VPN)"""
     strings = {
         "name": "HeroSMS",
-        "no_money": "❌ <b>Недостаточно средств.</b>",
-        "no_number": "❌ <b>Нет свободных номеров.</b>",
-        "active_exists": "⚠️ <b>Уже есть активный номер:</b> <code>{}</code>",
+        "no_money": "❌ <b>Баланс пуст.</b>",
+        "no_number": "❌ <b>Нет номеров.</b>",
+        "active_exists": "⚠️ <b>У вас есть номер:</b> <code>{}</code>",
         "no_active": "❌ <b>Нет активных заказов.</b>",
-        "num_info": "📱 <b>Номер:</b> <code>{}</code>\n🆔 <b>ID:</b> <code>{}</code>\n\n<i>Используйте .sms для проверки</i>",
-        "sms_wait": "⏳ <b>SMS еще не пришло...</b>",
+        "num_info": "📱 <b>Номер:</b> <code>{}</code>\n🆔 <b>ID:</b> <code>{}</code>\n\n<i>Проверка: .sms</i>",
+        "sms_wait": "⏳ <b>Ожидание SMS...</b>",
         "sms_res": "📩 <b>Код:</b> <code>{}</code>",
         "canceled": "🗑 <b>Заказ #{} отменен.</b>",
-        "conn_error": "🌐 <b>Ошибка подключения!</b> Сервис заблокирован или недоступен без VPN/Proxy.",
-        "error": "❗ <b>Ошибка API:</b> <code>{}</code>"
+        "conn_error": "🌐 <b>Ошибка сети.</b> Даже по IP не достучаться.",
+        "error": "❗ <b>Ошибка:</b> <code>{}</code>"
     }
 
     async def api_call(self, action, params=None):
         p = {"api_key": API_KEY, "action": action}
         if params: p.update(params)
         
+        # Подменяем Host, чтобы сервер принял запрос по IP
+        headers = {"Host": HOST_HEADER}
+        
         try:
-            async with aiohttp.ClientSession() as session:
-                # Используем proxy, если он указан
-                async with session.get(BASE_URL, params=p, proxy=PROXY, timeout=15) as resp:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(BASE_URL, params=p, timeout=10) as resp:
                     return await resp.text()
         except Exception:
             return "CONNECTION_ERROR"
 
     async def numbercmd(self, message):
-        """Получить номер"""
+        """Купить номер"""
         uid = str(message.sender_id)
         if self.get(uid):
             return await utils.answer(message, self.strings("active_exists").format(self.get(uid)['phone']))
@@ -66,7 +69,7 @@ class HeroSMSMod(loader.Module):
             
         if "ACCESS_NUMBER" in res:
             _, aid, phone = res.split(":")
-            self.set(uid, {"id": aid, "phone": phone, "time": time.time()})
+            self.set(uid, {"id": aid, "phone": phone})
             await utils.answer(message, self.strings("num_info").format(phone, aid))
         elif "NO_NUMBERS" in res:
             await utils.answer(message, self.strings("no_number"))
@@ -94,7 +97,7 @@ class HeroSMSMod(loader.Module):
             await utils.answer(message, self.strings("sms_wait"))
         elif "STATUS_CANCEL" in res:
             self.set(uid, None)
-            await utils.answer(message, "❌ Номер отменен сервисом.")
+            await utils.answer(message, "❌ Отменено сервисом.")
         else:
             await utils.answer(message, self.strings("error").format(res))
 
