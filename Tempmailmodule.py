@@ -15,6 +15,10 @@ class TempMailMod(loader.Module):
 
     def __init__(self):
         self.users_mail = {}
+        # Маскируемся под обычный браузер, чтобы обойти базовые защиты 1secmail
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
 
     async def _check_mail(self, message):
         user_id = message.sender_id if message.sender_id else message.chat_id
@@ -37,9 +41,12 @@ class TempMailMod(loader.Module):
         await utils.answer(message, "⏳ Создание временной почты...")
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get("https://www.1secmail.com/api/v1/?action=getDomainList") as resp:
-                    domains = await resp.json()
+            async with aiohttp.ClientSession(headers=self.headers) as session:
+                # Отключаем проверку SSL (ssl=False) для совместимости со старыми серверами
+                async with session.get("https://www.1secmail.com/api/v1/?action=getDomainList", ssl=False) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"HTTP Status {resp.status}")
+                    domains = await resp.json(content_type=None) # Игнорируем тип контента на случай кривых заголовков API
             
             domain = random.choice(domains)
             login = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
@@ -62,8 +69,8 @@ class TempMailMod(loader.Module):
                 f"🔄 Проверить письма: <code>.letters</code>"
             )
         except Exception as e:
-            print(f"[TempMail] [-] Error creating mail: {e}")
-            await utils.answer(message, "❌ Ошибка при обращении к API 1secmail.")
+            print(f"[TempMail] [-] Error creating mail: {type(e).__name__}: {e}")
+            await utils.answer(message, f"❌ <b>Ошибка API 1secmail:</b>\n<code>{type(e).__name__}: {e}</code>")
 
     @loader.command()
     async def letterscmd(self, message):
@@ -76,9 +83,11 @@ class TempMailMod(loader.Module):
         
         try:
             url = f"https://www.1secmail.com/api/v1/?action=getMessages&login={mail_data['login']}&domain={mail_data['domain']}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    messages = await resp.json()
+            async with aiohttp.ClientSession(headers=self.headers) as session:
+                async with session.get(url, ssl=False) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"HTTP Status {resp.status}")
+                    messages = await resp.json(content_type=None)
                     
             if not messages:
                 await utils.answer(
@@ -101,8 +110,8 @@ class TempMailMod(loader.Module):
             print(f"[TempMail] [+] Fetched {len(messages)} letters for {mail_data['email']}")
             
         except Exception as e:
-            print(f"[TempMail] [-] Error fetching letters: {e}")
-            await utils.answer(message, "❌ Ошибка при получении писем.")
+            print(f"[TempMail] [-] Error fetching letters: {type(e).__name__}: {e}")
+            await utils.answer(message, f"❌ <b>Ошибка при получении писем:</b>\n<code>{type(e).__name__}: {e}</code>")
 
     @loader.command()
     async def refreshcmd(self, message):
@@ -126,9 +135,11 @@ class TempMailMod(loader.Module):
         
         try:
             url = f"https://www.1secmail.com/api/v1/?action=readMessage&login={mail_data['login']}&domain={mail_data['domain']}&id={msg_id}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    msg_data = await resp.json()
+            async with aiohttp.ClientSession(headers=self.headers) as session:
+                async with session.get(url, ssl=False) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"HTTP Status {resp.status}")
+                    msg_data = await resp.json(content_type=None)
             
             if "id" not in msg_data:
                 await utils.answer(message, "❌ Письмо не найдено. Возможно, неверный ID или оно было удалено.")
@@ -154,8 +165,8 @@ class TempMailMod(loader.Module):
             print(f"[TempMail] [+] Read letter {msg_id} for {mail_data['email']}")
             
         except Exception as e:
-            print(f"[TempMail] [-] Error reading letter: {e}")
-            await utils.answer(message, "❌ Ошибка при загрузке письма.")
+            print(f"[TempMail] [-] Error reading letter: {type(e).__name__}: {e}")
+            await utils.answer(message, f"❌ <b>Ошибка при загрузке письма:</b>\n<code>{type(e).__name__}: {e}</code>")
 
 def register(cb):
     cb.add_class(TempMailMod)
