@@ -5,7 +5,7 @@
 #             | | | | | | (_| | (_| |      
 #             \_| |_/_|_|\__,_|\__,_|      
 #                                          
-#        Hikka SMS Receiver Module         
+#        Hikka SMS Receiver Module (Anti-Block)
 #        Author: @Kilka_Young              
 #        API: Hero-SMS.com                 
 
@@ -16,32 +16,42 @@ from .. import loader, utils
 
 # === НАСТРОЙКИ ===
 API_KEY = "1b45Ac5f32776e26412b85c980c467fc"
-SERVICE = "tg"  # telegram
-COUNTRY = "ru"  # russia
+SERVICE = "tg"
+COUNTRY = "ru"
 BASE_URL = "https://api.hero-sms.com/stubs/handler_api.php"
+
+# Если без VPN не работает, вставь сюда адрес прокси (например "http://user:pass@ip:port")
+# Если оставить None, будет пытаться соединиться напрямую
+PROXY = None 
 
 @loader.tds
 class HeroSMSMod(loader.Module):
-    """Модуль для получения номеров через Hero-SMS"""
+    """Модуль для получения номеров через Hero-SMS (с обходом блокировок)"""
     strings = {
         "name": "HeroSMS",
-        "no_money": "❌ <b>Недостаточно средств на Hero-SMS.</b>",
+        "no_money": "❌ <b>Недостаточно средств.</b>",
         "no_number": "❌ <b>Нет свободных номеров.</b>",
-        "active_exists": "⚠️ <b>У вас уже есть активный номер:</b> <code>{}</code>",
+        "active_exists": "⚠️ <b>Уже есть активный номер:</b> <code>{}</code>",
         "no_active": "❌ <b>Нет активных заказов.</b>",
-        "num_info": "📱 <b>Номер:</b> <code>{}</code>\n🆔 <b>ID:</b> <code>{}</code>\n⌛️ <b>Статус:</b> Ожидание SMS\n\n<i>Используйте .sms для проверки</i>",
-        "sms_wait": "⏳ <b>SMS еще не пришло.</b>",
+        "num_info": "📱 <b>Номер:</b> <code>{}</code>\n🆔 <b>ID:</b> <code>{}</code>\n\n<i>Используйте .sms для проверки</i>",
+        "sms_wait": "⏳ <b>SMS еще не пришло...</b>",
         "sms_res": "📩 <b>Код:</b> <code>{}</code>",
         "canceled": "🗑 <b>Заказ #{} отменен.</b>",
-        "error": "❗ <b>Ошибка:</b> <code>{}</code>"
+        "conn_error": "🌐 <b>Ошибка подключения!</b> Сервис заблокирован или недоступен без VPN/Proxy.",
+        "error": "❗ <b>Ошибка API:</b> <code>{}</code>"
     }
 
     async def api_call(self, action, params=None):
         p = {"api_key": API_KEY, "action": action}
         if params: p.update(params)
-        async with aiohttp.ClientSession() as session:
-            async with session.get(BASE_URL, params=p) as resp:
-                return await resp.text()
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Используем proxy, если он указан
+                async with session.get(BASE_URL, params=p, proxy=PROXY, timeout=15) as resp:
+                    return await resp.text()
+        except Exception:
+            return "CONNECTION_ERROR"
 
     async def numbercmd(self, message):
         """Получить номер"""
@@ -51,6 +61,9 @@ class HeroSMSMod(loader.Module):
 
         res = await self.api_call("getNumber", {"service": SERVICE, "country": COUNTRY})
         
+        if res == "CONNECTION_ERROR":
+            return await utils.answer(message, self.strings("conn_error"))
+            
         if "ACCESS_NUMBER" in res:
             _, aid, phone = res.split(":")
             self.set(uid, {"id": aid, "phone": phone, "time": time.time()})
@@ -70,6 +83,9 @@ class HeroSMSMod(loader.Module):
             return await utils.answer(message, self.strings("no_active"))
 
         res = await self.api_call("getStatus", {"id": active["id"]})
+
+        if res == "CONNECTION_ERROR":
+            return await utils.answer(message, self.strings("conn_error"))
 
         if "STATUS_OK" in res:
             code = res.split(":")[1]
