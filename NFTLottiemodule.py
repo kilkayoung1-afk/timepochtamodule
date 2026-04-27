@@ -15,6 +15,7 @@ NFT-подарок (action=MessageActionStarGiftUnique) или ссылку ви
 https://t.me/nft/PlushPepe-1234.
 """
 
+import gzip
 import io
 import logging
 import re
@@ -59,8 +60,8 @@ class NFTLottieMod(loader.Module):
 
     strings_ru = {
         "_cls_doc": (
-            "Скачивает Lottie (TGS) из NFT-подарка Telegram и отдаёт "
-            "пользователю файлом .tgs"
+            "Скачивает Lottie из NFT-подарка Telegram и отдаёт пользователю "
+            "файлом .json (распакованный TGS)"
         ),
     }
 
@@ -118,18 +119,30 @@ class NFTLottieMod(loader.Module):
             return
 
         model_name = getattr(model, "name", None) or slug
-        filename = f"{self._safe_filename(model_name)}.tgs"
+        base = self._safe_filename(model_name)
+        json_filename = f"{base}.json"
 
         await utils.answer(
             message,
-            self.strings("uploading").format(name=utils.escape_html(filename)),
+            self.strings("uploading").format(name=utils.escape_html(json_filename)),
         )
 
         document = model.document
-        buf = io.BytesIO()
-        await self._client.download_file(document, buf)
-        buf.seek(0)
-        buf.name = filename
+        tgs_buf = io.BytesIO()
+        await self._client.download_file(document, tgs_buf)
+        tgs_buf.seek(0)
+        tgs_bytes = tgs_buf.getvalue()
+
+        # .tgs — это gzip(Lottie JSON). Распаковываем, чтобы отдать именно
+        # Lottie-анимацию (.json) и избежать рендеринга как стикера.
+        try:
+            json_bytes = gzip.decompress(tgs_bytes)
+        except OSError:
+            json_bytes = tgs_bytes
+            json_filename = f"{base}.tgs"
+
+        json_buf = io.BytesIO(json_bytes)
+        json_buf.name = json_filename
 
         pattern = self._attr_value(gift, "StarGiftAttributePattern")
         backdrop = self._attr_value(gift, "StarGiftAttributeBackdrop")
@@ -143,10 +156,11 @@ class NFTLottieMod(loader.Module):
         reply = await message.get_reply_message()
         await message.client.send_file(
             message.peer_id,
-            buf,
+            json_buf,
             caption=caption,
-            attributes=[DocumentAttributeFilename(file_name=filename)],
+            attributes=[DocumentAttributeFilename(file_name=json_filename)],
             force_document=True,
+            mime_type="application/json",
             reply_to=reply.id if reply else None,
         )
 
@@ -155,7 +169,7 @@ class NFTLottieMod(loader.Module):
         except Exception:
             pass
 
-        logger.info("NFTLottie: sent %s as file %s", slug, filename)
+        logger.info("NFTLottie: sent %s as file %s", slug, json_filename)
 
     @loader.command(ru_doc="<слаг|ссылка> — скачать Lottie из NFT-подарка как файл .tgs")
     async def nftlottie(self, message):
