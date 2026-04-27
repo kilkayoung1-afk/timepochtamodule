@@ -1,17 +1,16 @@
 # meta developer: @Kilka_Young
-# meta desc: Скачивает Lottie-анимацию (TGS) из NFT-подарка Telegram и отдаёт пользователю
+# meta desc: Скачивает Lottie-анимацию (TGS) из NFT-подарка Telegram и отдаёт пользователю файлом
 # scope: hikka_only
 # scope: hikka_min 1.6.2
 
 """
 NFTLottie — модуль для Hikka.
 
-Команды:
+Команда:
     .nftlottie <slug|ссылка>   — скачать Lottie-модель из NFT-подарка и отправить
-                                  её в текущий чат как TGS-стикер.
-    .nftlottiefile <slug|...>  — то же, но как файл .tgs (для скачивания).
+                                  её в текущий чат как файл .tgs.
 
-Можно также ответить (.nftlottie без аргумента) на сообщение, содержащее
+Без аргумента можно ответить (.nftlottie) на сообщение, содержащее
 NFT-подарок (action=MessageActionStarGiftUnique) или ссылку вида
 https://t.me/nft/PlushPepe-1234.
 """
@@ -23,8 +22,6 @@ import re
 from telethon.tl.functions.payments import GetUniqueStarGiftRequest
 from telethon.tl.types import (
     DocumentAttributeFilename,
-    DocumentAttributeSticker,
-    InputStickerSetEmpty,
     MessageActionStarGiftUnique,
     StarGiftUnique,
 )
@@ -38,7 +35,7 @@ SLUG_RE = re.compile(r"(?:t\.me/nft/)?([A-Za-z][A-Za-z0-9]*-\d+)")
 
 @loader.tds
 class NFTLottieMod(loader.Module):
-    """Скачивает Lottie (TGS) из NFT-подарка Telegram и отдаёт пользователю"""
+    """Скачивает Lottie (TGS) из NFT-подарка Telegram и отдаёт пользователю файлом"""
 
     strings = {
         "name": "NFTLottie",
@@ -50,7 +47,7 @@ class NFTLottieMod(loader.Module):
         "fetching": "⏳ <b>Получаю NFT-подарок</b> <code>{slug}</code>...",
         "not_found": "❌ <b>NFT-подарок</b> <code>{slug}</code> <b>не найден.</b>",
         "no_model": "❌ <b>В подарке нет модели с анимацией.</b>",
-        "uploading": "⬆️ <b>Отправляю</b> <code>{name}</code>...",
+        "uploading": "⬆️ <b>Отправляю файл</b> <code>{name}</code>...",
         "info": (
             "🎁 <b>NFT-подарок:</b> <code>{slug}</code>\n"
             "🪄 <b>Модель:</b> <b>{model}</b>\n"
@@ -61,7 +58,10 @@ class NFTLottieMod(loader.Module):
     }
 
     strings_ru = {
-        "_cls_doc": "Скачивает Lottie (TGS) из NFT-подарка Telegram и отдаёт пользователю",
+        "_cls_doc": (
+            "Скачивает Lottie (TGS) из NFT-подарка Telegram и отдаёт "
+            "пользователю файлом .tgs"
+        ),
     }
 
     @staticmethod
@@ -111,27 +111,28 @@ class NFTLottieMod(loader.Module):
         gift = getattr(result, "gift", None)
         return gift if isinstance(gift, StarGiftUnique) else None
 
-    async def _send_lottie(self, message, gift, slug, as_file):
+    async def _send_lottie(self, message, gift, slug):
         model = self._attr_value(gift, "StarGiftAttributeModel")
         if model is None or getattr(model, "document", None) is None:
             await utils.answer(message, self.strings("no_model"))
             return
 
         model_name = getattr(model, "name", None) or slug
+        filename = f"{self._safe_filename(model_name)}.tgs"
+
         await utils.answer(
             message,
-            self.strings("uploading").format(name=utils.escape_html(model_name)),
+            self.strings("uploading").format(name=utils.escape_html(filename)),
         )
 
         document = model.document
         buf = io.BytesIO()
         await self._client.download_file(document, buf)
         buf.seek(0)
-        buf.name = f"{self._safe_filename(model_name)}.tgs"
+        buf.name = filename
 
         pattern = self._attr_value(gift, "StarGiftAttributePattern")
         backdrop = self._attr_value(gift, "StarGiftAttributeBackdrop")
-        title = getattr(gift, "title", None) or slug
         caption = self.strings("info").format(
             slug=utils.escape_html(slug),
             model=utils.escape_html(model_name),
@@ -139,28 +140,13 @@ class NFTLottieMod(loader.Module):
             backdrop=utils.escape_html(getattr(backdrop, "name", "—") or "—"),
         )
 
-        if as_file:
-            attributes = [
-                DocumentAttributeFilename(file_name=buf.name),
-            ]
-            force_document = True
-        else:
-            attributes = [
-                DocumentAttributeFilename(file_name=buf.name),
-                DocumentAttributeSticker(
-                    alt="🎁",
-                    stickerset=InputStickerSetEmpty(),
-                ),
-            ]
-            force_document = False
-
         reply = await message.get_reply_message()
         await message.client.send_file(
             message.peer_id,
             buf,
             caption=caption,
-            attributes=attributes,
-            force_document=force_document,
+            attributes=[DocumentAttributeFilename(file_name=filename)],
+            force_document=True,
             reply_to=reply.id if reply else None,
         )
 
@@ -169,9 +155,11 @@ class NFTLottieMod(loader.Module):
         except Exception:
             pass
 
-        logger.info("NFTLottie: sent %s (title=%s) as_file=%s", slug, title, as_file)
+        logger.info("NFTLottie: sent %s as file %s", slug, filename)
 
-    async def _run(self, message, as_file):
+    @loader.command(ru_doc="<слаг|ссылка> — скачать Lottie из NFT-подарка как файл .tgs")
+    async def nftlottie(self, message):
+        """<slug|link> — download Lottie from an NFT gift and send it as a .tgs file"""
         slug = await self._resolve_slug(message)
         if not slug:
             await utils.answer(message, self.strings("no_args"))
@@ -191,20 +179,10 @@ class NFTLottieMod(loader.Module):
             return
 
         try:
-            await self._send_lottie(message, gift, slug, as_file=as_file)
+            await self._send_lottie(message, gift, slug)
         except Exception as exc:
             logger.exception("NFTLottie send failed: %s", exc)
             await utils.answer(
                 message,
                 self.strings("error").format(err=utils.escape_html(str(exc))),
             )
-
-    @loader.command(ru_doc="<слаг|ссылка> — скачать Lottie-модель из NFT-подарка")
-    async def nftlottie(self, message):
-        """<slug|link> — download Lottie model from an NFT gift and send it as a sticker"""
-        await self._run(message, as_file=False)
-
-    @loader.command(ru_doc="<слаг|ссылка> — скачать Lottie из NFT-подарка как файл .tgs")
-    async def nftlottiefile(self, message):
-        """<slug|link> — download Lottie from an NFT gift as a .tgs file"""
-        await self._run(message, as_file=True)
