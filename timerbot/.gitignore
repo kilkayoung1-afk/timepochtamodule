@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+bot.db
+bot.db-journal
+sessions/
+*.session
+*.session-journal
+.env
